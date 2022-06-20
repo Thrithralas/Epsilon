@@ -18,6 +18,8 @@ handleBuiltin s vs = case (s, vs) of
     ("==", [VInt a, VInt b]) -> pure $ VBool $ a == b
     ("<", [VInt a, VInt b]) -> pure $ VBool $ a < b
     (">", [VInt a, VInt b]) -> pure $ VBool $ a > b
+    ("||", [VBool a, VBool b]) -> pure $ VBool $ a || b
+    ("&&", [VBool a, VBool b]) -> pure $ VBool $ a && b
     ("print", [VInt a]) -> VVoid <$ liftIO (print a)
     ("printStr", [VString s]) -> VVoid <$ liftIO (putStrLn s)
     _ -> fail $ "No pattern for builtin function '" ++ s ++ "'"

@@ -34,7 +34,7 @@ expression = do
 
 funInvoke :: CanFail m => Parser m Expression
 funInvoke = do
-    name <- some $ satisfy isAlpha
+    name <- some $ tok $ satisfy isAlpha
     xs <- between (tok $ eq '(') (tok $ eq ')') $ sepBy expression (tok $ eq ',')
     pure $ ApplyFun (Lookup name) xs
 
