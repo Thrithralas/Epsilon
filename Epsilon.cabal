@@ -1,0 +1,37 @@
+cabal-version:      3.0
+name:               Epsilon
+version:            0.1.0.0
+synopsis:
+
+-- A longer description of the package.
+-- description:
+homepage:
+
+-- A URL where users can report bugs.
+-- bug-reports:
+license:            NONE
+author:             Thrithralas
+maintainer:         tx0lwm@inf.elte.hu
+
+-- A copyright notice.
+-- copyright:
+-- category:
+extra-source-files: CHANGELOG.md
+
+executable Epsilon
+    main-is:          Main.hs
+
+    -- Modules included in this executable, other than Main.
+    other-modules:
+        Epsilon.Parser,
+        Epsilon.Interpreter,
+        Epsilon.Internal.Constructs
+
+    -- LANGUAGE extensions used by modules in this package.
+    -- other-extensions:
+    build-depends:    
+        base ^>= 4.16.1.0,
+        optics ^>= 0.4.2
+        
+    hs-source-dirs:   app
+    default-language: GHC2021
