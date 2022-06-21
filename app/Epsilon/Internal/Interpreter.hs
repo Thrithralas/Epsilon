@@ -1,20 +1,25 @@
-{-# LANGUAGE LambdaCase, TemplateHaskell, RecordWildCards #-}
+{-# LANGUAGE LambdaCase, TemplateHaskell, RecordWildCards, OverloadedStrings, RebindableSyntax #-}
 
 module Epsilon.Internal.Interpreter where
 
 import Epsilon.Internal.Parser hiding ( modify, _environment, environment, _backlog, backlog, _crashed, crashed )
 import Control.Monad.IO.Class
 import Control.Applicative
-import Control.Monad
+import Control.Monad hiding ( MonadFail(..) )
 import Optics
 import qualified Epsilon.Internal.Parser as EIP
 import Debug.Trace
+import Data.Text hiding ( empty, zip, foldl )
+import Epsilon.Internal.Classes
+import Prelude hiding ( MonadFail(..), putStrLn )
+import Data.Text.IO
+import Data.String
 
 newtype Interpreter m a = Interpreter { runInterpreter :: InterpreterState -> m (Either InterpreterState (InterpreterState, a))}
 
 data InterpreterState = IS {
     _environment :: Environment,
-    _backlog :: [String],
+    _backlog :: [Text],
     _crashed :: Bool
 } deriving Show
 
@@ -81,7 +86,7 @@ instance MonadIO m => MonadIO (Interpreter m) where
 instance Monad m => MonadFail (Interpreter m) where
     fail s = Interpreter $ \st -> pure $ Left ((crashed .~ True) . (backlog %~ (s :)) $ st)
 
-handleBuiltin :: (MonadIO m, MonadFail m) => String {- name -} -> [Value] -> Interpreter m Value
+handleBuiltin :: (MonadIO m, MonadFail m) => Text {- name -} -> [Value] -> Interpreter m Value
 handleBuiltin s vs = case (s, vs) of
     ("+", [VInt a, VInt b]) -> pure $ VInt $ a + b
     ("-", [VInt a, VInt b]) -> pure $ VInt $ a - b
@@ -95,7 +100,7 @@ handleBuiltin s vs = case (s, vs) of
     ("&&", [VBool a, VBool b]) -> pure $ VBool $ a && b
     ("print", [VInt a]) -> VVoid <$ liftIO (print a)
     ("printStr", [VString s]) -> VVoid <$ liftIO (putStrLn s)
-    _ -> fail $ "No pattern for builtin function '" ++ s ++ "'"
+    _ -> fail $ "No pattern for builtin function '" <> s <> "'"
 
 evalExp :: (MonadIO m, MonadFail m) => Expression -> Interpreter m Value
 evalExp = \case
@@ -109,7 +114,7 @@ evalExp = \case
         case lookup s (st ^. environment) of
             Just (Value l _) -> pure l
             Just fe        -> pure $ VFunction s fe
-            _              -> fail $ "No entry with name '" ++ s ++ "'"
+            _              -> fail $ "No entry with name '" <> s <> "'"
     ApplyFun x@(Lookup s) params -> do
         func <- evalExp x
         vals <- mapM evalExp params
@@ -118,22 +123,22 @@ evalExp = \case
             VFunction s (Function _ _ _ Nothing) -> handleBuiltin s vals
             _ -> fail "Expression does not reference a function"
 
-runFunction :: (MonadIO m, MonadFail m) => [(Value, Param)] -> [Statement] -> String {- name -} -> EpsilonType {- returnType -} -> Interpreter m Value
+runFunction :: (MonadIO m, MonadFail m) => [(Value, Param)] -> [Statement] -> Text {- name -} -> EpsilonType {- returnType -} -> Interpreter m Value
 runFunction vps func n rt = do
     e <- getEnv
     forM_ vps (\(val, par) -> case par of
         Unnamed _ -> fail "Unnamed params not allowed in non-builtin function or operator"
-        WellTyped t n -> if typeOf val == t then modifyEnv ((n, Value val t) :) else fail $ "Couldn't match type " ++ showE t ++ " of parameter '" ++ n ++ "' with actual type " ++ showE (typeOf val) ++ "\n\tin the function invocation of " ++ n
+        WellTyped t n -> if typeOf val == t then modifyEnv ((n, Value val t) :) else fail $ "Couldn't match type " <> showE t <> " of parameter '" <> n <> "' with actual type " <> showE (typeOf val) <> "\n\tin the function invocation of " <> n
         Inferred n -> modifyEnv ((n, Value val (typeOf val)) :)
         )
     interpretStatements func
     e' <- getEnv
     putEnv $ e --drop (length e' - length e) e'
     case lookup "$RETURN" e' of
-        Just (Value v t) -> if t == rt then pure v else fail $ "Couldn't match type " ++ showE t ++ " with return type " ++ showE rt ++ "\n\tin the function invocation of " ++ n
+        Just (Value v t) -> if t == rt then pure v else fail $ "Couldn't match type " <> showE t <> " with return type " <> showE rt <> "\n\tin the function invocation of " <> n
         Just _ -> fail "Illegal return value"
         _ | rt == TVoid -> pure VVoid
-        _               -> fail $ "Missing non-void return value of type " ++ showE rt ++ "\n\tin the function invocation of " ++ n
+        _               -> fail $ "Missing non-void return value of type " <> showE rt <> "\n\tin the function invocation of " <> n
     
      
 
@@ -148,13 +153,13 @@ typeOf (VFloat _) = TFloat
 typeOf (VVoid) = TVoid
 
 
-updateEnvironment :: MonadFail m => String -> Value -> Environment -> Interpreter m Environment
+updateEnvironment :: MonadFail m => Text -> Value -> Environment -> Interpreter m Environment
 updateEnvironment s v [] = pure [(s, Value v (typeOf v))]
 updateEnvironment s v (x@(s',v'):xs)
     | s /= s' = fmap (x:) $ updateEnvironment s v xs
     | Value v'' t <- v' = case t == typeOf v of
         True -> pure $ (s, Value v t) : xs
-        _    -> fail $ "Couldn't match type " ++ show t ++ " (ILT: " ++ show v'' ++ ") of field '" ++ s ++ "' with actual type " ++ show (typeOf v)
+        _    -> fail $ "Couldn't match type " <> (pack $ show t) <> " (ILT: " <> (pack $ show  v'') <> ") of field '" <> s <> "' with actual type " <> (pack $ show $ typeOf v)
     | otherwise = fmap (x:) $ updateEnvironment s v xs
 
 evalStatement :: (MonadIO m, MonadFail m) => Statement -> Interpreter m ()
@@ -185,11 +190,11 @@ evalStatement s = do
                     EnvironmentChanged -> pure ()           
 
 
-parseThenInterpret :: (MonadFail m, MonadIO m) => String -> Environment -> m ()
+parseThenInterpret :: (MonadFail m, MonadIO m) => Text -> Environment -> m ()
 parseThenInterpret s env = case runParser program ((EIP.string .~ s) . (EIP.environment .~ env) $ mempty) of
-    Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ foldl (\acc a -> acc ++ "\n\t" ++ a) "PARSE ERROR: " bl
+    Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "PARSE ERROR: " bl
     Right (PS { _environment = env, ..}, sts) -> runInterpreter (interpretStatements sts) (environment .~ env $ mempty) >>= (\case
-        Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc ++ "\n\t" ++ a) "RUNTIME ERROR: " bl
+        Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "RUNTIME ERROR: " bl
         Right _                     -> pure ()
         )
 

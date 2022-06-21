@@ -1,17 +1,20 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Epsilon.Internal.Interpreter
 import System.Environment
 import Epsilon.Internal.Parser
 import Control.Monad
-
+import Data.Text ( Text, pack, uncons, unpack, concat )
+import Data.Text.IO ( readFile )
+import Prelude hiding ( readFile, concat )
 
 data EpsilonFlags =
     PrettyPrint |
     AutomaticBuiltins
     deriving (Eq, Show)
 
-shorthands :: [(String, EpsilonFlags)]
+shorthands :: [(Text, EpsilonFlags)]
 shorthands = [
     ("pp", PrettyPrint),
     ("pretty-print", PrettyPrint),
@@ -19,16 +22,17 @@ shorthands = [
     ("auto-builtins", AutomaticBuiltins)
     ]
 
-match :: [String] -> ([String], [EpsilonFlags])
+match :: [Text] -> ([Text], [EpsilonFlags])
 match [] = ([],[])
-match (('-':'-':x):xs) = case lookup x shorthands of
-    Just ef -> (ss, ef : efs)
-    _       -> (ss, efs)
+match (x:xs) = case uncons x of
+    Nothing -> (fs, flgs)
+    Just (c, cs) -> case uncons cs of
+        Just (c', cs') | c == '-' && c' == '-' -> case lookup cs' shorthands of
+            Just a -> (fs, a : flgs)
+            _      -> (fs, flgs)
+        _          -> (x : fs, flgs)
     where
-        (ss, efs) = match xs
-match (x:xs) = (x : ss, efs)
-    where
-        (ss, efs) = match xs
+        (fs, flgs) = match xs
 
 autoEnv :: Environment
 autoEnv = [
@@ -47,8 +51,8 @@ autoEnv = [
 main :: IO ()
 main = do
     args <- getArgs
-    let (files, flags) = match args
+    let (files, flags) = match (fmap pack args)
     let env = if elem AutomaticBuiltins flags then autoEnv else []
-    contents <- concat <$> mapM readFile files
+    contents <- concat <$> mapM readFile (fmap unpack files)
     parseThenInterpret contents env
     

@@ -1,39 +1,49 @@
-{-# LANGUAGE TemplateHaskell, RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell, RecordWildCards, OverloadedStrings, RebindableSyntax #-}
+
 module Epsilon.Internal.Parser where
 
-import Optics hiding (assign)
-import Data.List
+import Optics hiding ( assign, uncons )
+import Data.List hiding ( tail, uncons )
 import Control.Applicative
-import Control.Monad
+import Control.Monad hiding ( MonadFail(..) )
 import Data.Char
 import Data.Function
+import Data.Text ( Text, pack, uncons, unpack )
+import Epsilon.Internal.Classes
+import Prelude hiding ( MonadFail(..) )
+import qualified Data.Text as T ( empty )
+import Data.String
+
+ifThenElse :: Bool -> a -> a -> a
+ifThenElse True a b = a
+ifThenElse False a b = b
 
 newtype Parser a = Parser { runParser :: ParserState -> Either ParserState (ParserState, a) }
 
 data ParserState = PS {
     _environment :: Environment,
-    _backlog :: [String],
-    _string :: String,
+    _backlog :: [Text],
+    _string :: Text,
     _lineNum :: Int,
     _columnNum :: Int,
     _crashed :: Bool
 } deriving Show
 
-type Environment = [(String, EnvironmentEntry)]
+type Environment = [(Text, EnvironmentEntry)]
 
 data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show)
 
-showE :: EpsilonType -> String
-showE = tail . show
+showE :: EpsilonType -> Text
+showE = pack . tail . show
 
-data Value = VInt Integer | VBool Bool | VString String | VVoid | VFloat Double | VFunction String EnvironmentEntry deriving Show
+data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double | VFunction Text EnvironmentEntry deriving Show
 
 data Expression = 
-    Lookup String                    |
+    Lookup Text                    |
     IntLit Integer                   |
     BoolLit Bool                     |
     FloatLit Double                  |
-    StringLit String                 |
+    StringLit Text                 |
     ApplyFun Expression [Expression]
         deriving Show
 
@@ -54,7 +64,7 @@ data EnvironmentEntry =
         deriving Show
 
 data Fixity = Infix { getFixity :: Int} | InfixR { getFixity :: Int } | InfixL { getFixity :: Int } deriving (Eq, Show)
-data Param = Unnamed EpsilonType | Inferred String | WellTyped EpsilonType String deriving Show
+data Param = Unnamed EpsilonType | Inferred Text | WellTyped EpsilonType Text deriving Show
 
 
 makeLenses ''EnvironmentEntry
@@ -84,7 +94,8 @@ instance Monad Parser where
 instance MonadFail Parser where
     fail s = Parser $ \st -> Left ((crashed .~ True) . (backlog %~ (format s st :)) $ st)
         where
-            format s st = foldr (++) [] [s, " at line ", show (st ^. lineNum), " at column ", show (st ^. columnNum)]
+            format :: Text -> ParserState -> Text
+            format s st = foldr (<>) T.empty [s, " at line ", pack $ show (st ^. lineNum), " at column ", pack $ show (st ^. columnNum)]
 
 instance MonadPlus Parser where
     mzero = empty
@@ -110,8 +121,8 @@ modify f = getState >>= setState . f
 satisfy :: (Char -> Bool) -> Parser Char
 satisfy p = do
     ps <- getState
-    case (ps ^. string) of
-        (c:cs) | p c -> c <$ setState ((string .~ cs) . (lineNum %~ lnump) . (columnNum %~ cnump) $ ps)
+    case uncons (ps ^. string) of
+        Just (c,cs) | p c -> c <$ setState ((string .~ cs) . (lineNum %~ lnump) . (columnNum %~ cnump) $ ps)
             where
                 lnump v = case c of
                     '\n'          -> v + 1
@@ -124,8 +135,8 @@ satisfy p = do
 char :: Char -> Parser ()
 char = void . satisfy . (==)
 
-seqOf :: String -> Parser ()
-seqOf = mapM_ char
+seqOf :: Text -> Parser ()
+seqOf = mapM_ char . unpack
 
 unsignedInt :: Integral i => Parser i
 unsignedInt = foldl1 (\acc a -> 10 * acc + a) 
@@ -165,17 +176,17 @@ between l r m = l *> m <* r
 between_ :: Parser a -> Parser c -> Parser b -> Parser ()
 between_ l r m = l *> void m <* r
 
-stringLit :: Parser String
-stringLit = between (char '"') (char '"' <|> fail "Unclosed string") (many $ satisfy  (\c -> case generalCategory c of
+stringLit :: Parser Text
+stringLit = between (char '"') (char '"' <|> fail "Unclosed string") (fmap pack $ many $ satisfy  (\c -> case generalCategory c of
         LineSeparator -> False
         _             -> c /= '\"'
         )) <|> fail "Multiline strings not supported"
 
-keywords :: [String]
+keywords :: [Text]
 keywords = ["if", "else", "while", "function", "operator", "builtin", "infixr", "infixl", "infix", "true", "false"]
 
-varName :: Parser String
-varName = some (satisfy isAlpha) >>= \s -> s <$ guard (notElem s keywords) <|> fail "Cannot use reserved keyword as variable name"
+varName :: Parser Text
+varName = pack <$> some (satisfy isAlpha) >>= \s -> s <$ guard (notElem s keywords) <|> fail "Cannot use reserved keyword as variable name"
 
 chainr1 :: Parser a ->  Parser (a -> a -> a) ->  Parser a
 chainr1 v op = v >>= \val ->
@@ -269,7 +280,7 @@ expression = do
 
 funInvoke :: Parser Expression
 funInvoke = do
-    name <- some $ tok $ satisfy isAlpha
+    name <- fmap pack $ some $ tok $ satisfy isAlpha
     xs <- between lbr rbr $ sepBy expression (char' ',')
     pure $ ApplyFun (Lookup name) xs
 
@@ -302,6 +313,7 @@ ifElse = do
     s' <- between (char' '{') (char' '}') $ multiS
     pure $ IfElse b s s'
 
+
 operator :: Parser Statement
 operator = do
     ws
@@ -311,7 +323,7 @@ operator = do
     j <- optional $ satisfy (\a -> a == 'r' || a == 'l')
     ws
     f <- tok unsignedInt
-    name <- tok $ many $ satisfy (\s -> not (isAlphaNum s) && s /= ')' && s /= '(' && s /= '[' && s /= ']' && s /= '{' && s /= '}' )
+    name <- fmap pack $ tok $ many $ satisfy (\s -> not (isAlphaNum s) && s /= ')' && s /= '(' && s /= '[' && s /= ']' && s /= '{' && s /= '}' )
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as operator name"
     (params, returnType, body) <- functionSignature $ null b
     let fixity = case j of {
@@ -327,7 +339,7 @@ function = do
     ws
     b <- optional $ tok $ seqOf "builtin"
     tok $ seqOf "function"
-    name <- tok $ many $ satisfy isAlpha
+    name <- fmap pack $ tok $ many $ satisfy isAlpha
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as function name"   
     (params, returnType, body) <- functionSignature $ null b
     EnvironmentChanged <$ modify (over environment ((name, Function Nothing params returnType (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
@@ -336,7 +348,7 @@ functionSignature :: Bool {- builtin -} -> Parser ([Param], EpsilonType, [Statem
 functionSignature ib = do
     ws
     params <- between (char' '(') (char' ')') $ sepBy1 (do
-            ps <- sepBy1 (tok $ many $ satisfy $ isAlpha) (char' ':')
+            ps <- sepBy1 (fmap pack $ tok $ many $ satisfy $ isAlpha) (char' ':')
             case ps of
                 []           -> fail "Empty parameter in function or operator declaration"
                 [x] | ib     -> pure $ Inferred x
@@ -345,12 +357,12 @@ functionSignature ib = do
                 _            -> fail "Malformed parameter in function or operator declaration"
         ) (char' ',')
     char' ':'
-    t <- toType <$> (tok $ many $ satisfy isAlpha)
+    t <- toType <$> (fmap pack $ tok $ many $ satisfy isAlpha)
     case ib of
         False -> pure $ (params, t, [])
         True -> (\s -> (params, t, s)) <$> between (char' '{') (char' '}') multiS
 
-toType :: String -> EpsilonType
+toType :: Text -> EpsilonType
 toType "int" = TInt
 toType "bool" = TBool
 toType "float" = TFloat
@@ -371,8 +383,8 @@ multiS :: Parser [Statement]
 multiS = many statement--sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
 
 eof :: Parser ()
-eof = Parser $ \st -> case (st ^. string) of
-    [] -> pure (st, ())
+eof = Parser $ \st -> case uncons (st ^. string) of
+    Nothing -> pure (st, ())
     _  -> Left (crashed .~ True $ st)
 
 
