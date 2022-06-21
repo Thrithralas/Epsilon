@@ -110,29 +110,30 @@ evalExp = \case
             Just (Value l _) -> pure l
             Just fe        -> pure $ VFunction s fe
             _              -> fail $ "No entry with name '" ++ s ++ "'"
-    ApplyFun x params -> do
+    ApplyFun x@(Lookup s) params -> do
         func <- evalExp x
         vals <- mapM evalExp params
         case func of
-            VFunction s (Function _ ps _ (Just instrs)) -> runFunction (zip vals ps) instrs
+            VFunction s (Function _ ps r (Just instrs)) -> runFunction (zip vals ps) instrs s r
             VFunction s (Function _ _ _ Nothing) -> handleBuiltin s vals
             _ -> fail "Expression does not reference a function"
 
-runFunction :: (MonadIO m, MonadFail m) => [(Value, Param)] -> [Statement] -> Interpreter m Value
-runFunction vps func = do
+runFunction :: (MonadIO m, MonadFail m) => [(Value, Param)] -> [Statement] -> String {- name -} -> EpsilonType {- returnType -} -> Interpreter m Value
+runFunction vps func n rt = do
     e <- getEnv
     forM_ vps (\(val, par) -> case par of
         Unnamed _ -> fail "Unnamed params not allowed in non-builtin function or operator"
-        WellTyped t n -> if typeOf val == t then modifyEnv ((n, Value val t) :) else fail $ "Couldn't match type " ++ show t ++ " of parameter '" ++ n ++ "' with actual type " ++ show (typeOf val)
+        WellTyped t n -> if typeOf val == t then modifyEnv ((n, Value val t) :) else fail $ "Couldn't match type " ++ showE t ++ " of parameter '" ++ n ++ "' with actual type " ++ showE (typeOf val) ++ "\n\tin the function invocation of " ++ n
         Inferred n -> modifyEnv ((n, Value val (typeOf val)) :)
         )
     interpretStatements func
     e' <- getEnv
     putEnv $ e --drop (length e' - length e) e'
     case lookup "$RETURN" e' of
-        Just (Value v _) -> pure v
+        Just (Value v t) -> if t == rt then pure v else fail $ "Couldn't match type " ++ showE t ++ " with return type " ++ showE rt ++ "\n\tin the function invocation of " ++ n
         Just _ -> fail "Illegal return value"
-        _ -> pure VVoid
+        _ | rt == TVoid -> pure VVoid
+        _               -> fail $ "Missing non-void return value of type " ++ showE rt ++ "\n\tin the function invocation of " ++ n
     
      
 
@@ -184,10 +185,11 @@ evalStatement s = do
                     EnvironmentChanged -> pure ()           
 
 
-parseThenInterpret :: (MonadFail m, MonadIO m) => String -> m ()
-parseThenInterpret s = case runParser program (EIP.string .~ s $ mempty) of
+parseThenInterpret :: (MonadFail m, MonadIO m) => String -> Environment -> m ()
+parseThenInterpret s env = case runParser program ((EIP.string .~ s) . (EIP.environment .~ env) $ mempty) of
     Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ foldl (\acc a -> acc ++ "\n\t" ++ a) "PARSE ERROR: " bl
     Right (PS { _environment = env, ..}, sts) -> runInterpreter (interpretStatements sts) (environment .~ env $ mempty) >>= (\case
         Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc ++ "\n\t" ++ a) "RUNTIME ERROR: " bl
         Right _                     -> pure ()
         )
+

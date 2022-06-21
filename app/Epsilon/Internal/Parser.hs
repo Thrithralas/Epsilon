@@ -22,6 +22,10 @@ data ParserState = PS {
 type Environment = [(String, EnvironmentEntry)]
 
 data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show)
+
+showE :: EpsilonType -> String
+showE = tail . show
+
 data Value = VInt Integer | VBool Bool | VString String | VVoid | VFloat Double | VFunction String EnvironmentEntry deriving Show
 
 data Expression = 
