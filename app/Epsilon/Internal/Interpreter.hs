@@ -3,18 +3,21 @@
 module Epsilon.Internal.Interpreter where
 
 import Epsilon.Internal.Parser hiding ( modify, _environment, environment, _backlog, backlog, _crashed, crashed )
+import Epsilon.Internal.SemanticAnalyzer hiding ( modify, _environment, environment, get, put, typeOf )
 import Control.Monad.IO.Class
 import Control.Applicative
 import Control.Monad hiding ( MonadFail(..) )
 import Optics
 import qualified Epsilon.Internal.Parser as EIP
+import qualified Epsilon.Internal.SemanticAnalyzer as EIS
 import Debug.Trace
-import Data.Text hiding ( empty, zip, foldl, foldl1 )
+import Data.Text hiding ( empty, zip, foldl, foldl1, foldr )
 import Epsilon.Internal.Classes
 import Prelude hiding ( MonadFail(..), putStrLn )
 import Data.Text.IO
 import Data.String
 import Data.List ( maximumBy )
+import qualified Data.Text as DT ( empty )
 
 newtype Interpreter m a = Interpreter { runInterpreter :: InterpreterState -> m (Either InterpreterState (InterpreterState, a))}
 
@@ -202,10 +205,14 @@ evalStatement s = do
 parseThenInterpret :: (MonadFail m, MonadIO m) => Text -> Environment -> m ()
 parseThenInterpret s env = case runParser program ((EIP.string .~ s) . (EIP.environment .~ env) $ mempty) of
     Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ "PARSE ERROR:\n\t" <> ((\(_,_,b) -> b) $ maximumBy orderLogs bl)
-    Right (PS { _environment = env, ..}, sts) -> runInterpreter (interpretStatements sts) (environment .~ env $ mempty) >>= (\case
-        Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "RUNTIME ERROR: " bl
-        Right _                     -> pure ()
-        )
+    Right (PS { _environment = env, ..}, sts) -> case runAnalyzer (analyzeProgramm sts) (EIS.environment .~ env $ mempty) of
+        Left (AS { _issues = i, .. }) -> liftIO $ putStrLn $ "SEMANTIC ANALYZER ERROR:\n\t" <> foldr (\(s,t) acc -> "[" <> toUpper (pack $ show s) <> "] " <> t <> "\n\t") DT.empty i
+        Right (AS { _issues = i, .. }, sts) -> do
+            liftIO $ putStrLn $ "SEMANTIC ANALYZER COMPLETE:\n\t" <> foldr (\(s,t) acc -> "[" <> toUpper (pack $ show s) <> "] " <> t <> "\n\t") DT.empty i
+            runInterpreter (interpretStatements sts) (environment .~ env $ mempty) >>= (\case
+                Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "RUNTIME ERROR: " bl
+                Right _                     -> pure ()
+                )
     where
         orderLogs (a,b,s) (d,c,s2)
             | a == d && b == c = case isPrefixOf "<" s of

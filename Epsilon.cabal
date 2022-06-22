@@ -25,6 +25,7 @@ executable Epsilon
     other-modules:
         Epsilon.Internal.Parser,
         Epsilon.Internal.Interpreter,
+        Epsilon.Internal.SemanticAnalyzer,
         Epsilon.Internal.Classes
 
     -- LANGUAGE extensions used by modules in this package.
