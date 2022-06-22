@@ -13,6 +13,7 @@ import Epsilon.Internal.Classes
 import Prelude hiding ( MonadFail(..) )
 import qualified Data.Text as T ( empty )
 import Data.String
+import Debug.Trace
 
 ifThenElse :: Bool -> a -> a -> a
 ifThenElse True a b = a
@@ -22,7 +23,7 @@ newtype Parser a = Parser { runParser :: ParserState -> Either ParserState (Pars
 
 data ParserState = PS {
     _environment :: Environment,
-    _backlog :: [Text],
+    _backlog :: [BacklogEntry],
     _string :: Text,
     _lineNum :: Int,
     _columnNum :: Int,
@@ -30,6 +31,7 @@ data ParserState = PS {
 } deriving Show
 
 type Environment = [(Text, EnvironmentEntry)]
+type BacklogEntry = (Int, Int, Text)
 
 data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show)
 
@@ -39,11 +41,11 @@ showE = pack . tail . show
 data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double | VFunction Text EnvironmentEntry deriving Show
 
 data Expression = 
-    Lookup Text                    |
-    IntLit Integer                   |
-    BoolLit Bool                     |
-    FloatLit Double                  |
-    StringLit Text                 |
+    Lookup Text                         |
+    IntLit Integer                      |
+    BoolLit Bool                        |
+    FloatLit Double                     |
+    StringLit Text                      |
     ApplyFun Expression [Expression]
         deriving Show
 
@@ -82,7 +84,9 @@ instance Applicative Parser where
 instance Alternative Parser where
     empty = fail "<Undisclosed Parse Error>"
     Parser p1 <|> Parser p2 = Parser $ \ps -> case p1 ps of
-        Left _   -> p2 ps
+        Left l1   -> case p2 ps of
+            Left l2 -> Left $ l1 <> l2
+            Right pr -> Right $ over _1 (l1 <>) pr
         Right pa -> Right pa
 
 instance Monad Parser where
@@ -92,19 +96,18 @@ instance Monad Parser where
 
 
 instance MonadFail Parser where
-    fail s = Parser $ \st -> Left ((crashed .~ True) . (backlog %~ (format s st :)) $ st)
+    fail s = Parser $ \st -> Left ((crashed .~ True) . (backlog %~ (:) (format s st) ) $ st)
         where
-            format :: Text -> ParserState -> Text
-            format s st = foldr (<>) T.empty [s, " at line ", pack $ show (st ^. lineNum), " at column ", pack $ show (st ^. columnNum)]
+            format :: Text -> ParserState -> (Int, Int, Text)
+            format s st = (st ^. lineNum, st ^. columnNum, foldr (<>) T.empty [s, " at line ", pack $ show (st ^. lineNum + 1), " at column ", pack $ show (st ^. columnNum + 1)])
 
 instance MonadPlus Parser where
     mzero = empty
     mplus = (<|>)
 
 instance Semigroup ParserState where
-    PS env log s ln cn c <> PS env2 log2 s2 ln2 cn2 c2 = case c of
-        False -> PS env log s ln cn c
-        True -> PS env2 (union log log2) s2 ln2 cn2 c2
+    ps1 <> ps2 = over backlog (\l -> union l (ps1 ^. backlog)) $ ps2
+    
 
 instance Monoid ParserState where
     mempty = PS [] [] "" 0 0 False
@@ -216,7 +219,7 @@ chain1 v op = do
             case val2 of
                 Nothing -> pure val
                 Just val' -> do
-                    o val val' <$ fails op
+                    o val val' <$ fails op <|> fail "Cannot chain infix operators"
 
 
 groupOn :: Eq b => (a -> b) -> [a] -> [[a]]
@@ -275,7 +278,7 @@ expression = do
         StringLit <$> tok stringLit <|>
         BoolLit <$> tok bool <|>
         tok funInvoke <|>
-        Lookup <$> tok varName) 
+        Lookup <$> tok varName <|> fail "Failed to parse expression") 
         lbr rbr
 
 funInvoke :: Parser Expression
@@ -370,7 +373,7 @@ toType "string" = TString
 toType "void" = TVoid
 
 statement :: Parser Statement
-statement = assign <|> while <|> ifElse <|> ifS <|> operator <|> function <|> returnStatement <|> Action <$> expression
+statement = assign <|> while <|> ifElse <|> ifS <|> operator <|> function <|> returnStatement <|> Action <$> expression <|> fail "Failed to parse statement"
 
 returnStatement :: Parser Statement
 returnStatement = do
@@ -380,7 +383,7 @@ returnStatement = do
 
 
 multiS :: Parser [Statement]
-multiS = many statement--sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
+multiS = many statement --sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
 
 eof :: Parser ()
 eof = Parser $ \st -> case uncons (st ^. string) of
@@ -389,4 +392,4 @@ eof = Parser $ \st -> case uncons (st ^. string) of
 
 
 program :: Parser [Statement]
-program = ws *> multiS <* (eof <|> fail "Unparsed program segment")
+program = ws *> multiS <* eof

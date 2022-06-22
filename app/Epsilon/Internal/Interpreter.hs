@@ -9,24 +9,26 @@ import Control.Monad hiding ( MonadFail(..) )
 import Optics
 import qualified Epsilon.Internal.Parser as EIP
 import Debug.Trace
-import Data.Text hiding ( empty, zip, foldl )
+import Data.Text hiding ( empty, zip, foldl, foldl1 )
 import Epsilon.Internal.Classes
 import Prelude hiding ( MonadFail(..), putStrLn )
 import Data.Text.IO
 import Data.String
+import Data.List ( maximumBy )
 
 newtype Interpreter m a = Interpreter { runInterpreter :: InterpreterState -> m (Either InterpreterState (InterpreterState, a))}
 
 data InterpreterState = IS {
     _environment :: Environment,
     _backlog :: [Text],
+    _stacktrace :: [Text],
     _crashed :: Bool
 } deriving Show
 
 instance Semigroup InterpreterState where
 
 instance Monoid InterpreterState where
-    mempty = IS [] [] False
+    mempty = IS [] [] [] False
 
 makeLenses ''InterpreterState
 
@@ -84,7 +86,9 @@ instance MonadIO m => MonadIO (Interpreter m) where
     liftIO io = Interpreter $ \s -> Right . (s,) <$> liftIO io
 
 instance Monad m => MonadFail (Interpreter m) where
-    fail s = Interpreter $ \st -> pure $ Left ((crashed .~ True) . (backlog %~ (s :)) $ st)
+    fail s = Interpreter $ \st -> pure $ Left ((crashed .~ True) . (backlog %~ (format s st :)) $ st)
+        where
+            format s st = s <> "\nSTACK TRACE:\n\t" <> intercalate "\n\t" (st ^. stacktrace ++ ["<top level>"])
 
 handleBuiltin :: (MonadIO m, MonadFail m) => Text {- name -} -> [Value] -> Interpreter m Value
 handleBuiltin s vs = case (s, vs) of
@@ -131,6 +135,7 @@ runFunction vps func n rt = do
         WellTyped t n -> if typeOf val == t then modifyEnv ((n, Value val t) :) else fail $ "Couldn't match type " <> showE t <> " of parameter '" <> n <> "' with actual type " <> showE (typeOf val) <> "\n\tin the function invocation of " <> n
         Inferred n -> modifyEnv ((n, Value val (typeOf val)) :)
         )
+    modify $ over stacktrace ((:) $ n <> "(" <> intercalate " , " (fmap showType vps) <> ")")
     interpretStatements func
     e' <- getEnv
     putEnv $ e --drop (length e' - length e) e'
@@ -139,6 +144,10 @@ runFunction vps func n rt = do
         Just _ -> fail "Illegal return value"
         _ | rt == TVoid -> pure VVoid
         _               -> fail $ "Missing non-void return value of type " <> showE rt <> "\n\tin the function invocation of " <> n
+    where
+            showType (_,Unnamed t) = toLower $ showE t
+            showType (_,WellTyped t _) = toLower $ showE t
+            showType (_,Inferred _) = "<inferred>" 
     
      
 
@@ -192,9 +201,19 @@ evalStatement s = do
 
 parseThenInterpret :: (MonadFail m, MonadIO m) => Text -> Environment -> m ()
 parseThenInterpret s env = case runParser program ((EIP.string .~ s) . (EIP.environment .~ env) $ mempty) of
-    Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "PARSE ERROR: " bl
+    Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ "PARSE ERROR:\n\t" <> ((\(_,_,b) -> b) $ maximumBy orderLogs bl)
     Right (PS { _environment = env, ..}, sts) -> runInterpreter (interpretStatements sts) (environment .~ env $ mempty) >>= (\case
         Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "RUNTIME ERROR: " bl
         Right _                     -> pure ()
         )
+    where
+        orderLogs (a,b,s) (d,c,s2)
+            | a == d && b == c = case isPrefixOf "<" s of
+                True -> LT
+                False -> case isPrefixOf "<" s2 of
+                    True -> GT
+                    False -> EQ
+            | a > d || (a == d && b > c) = GT
+            | otherwise = LT
+        
 
