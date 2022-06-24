@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, RecordWildCards, OverloadedStrings, RebindableSyntax #-}
+{-# LANGUAGE TemplateHaskell, RecordWildCards, OverloadedStrings, RebindableSyntax, DeriveAnyClass #-}
 
 module Epsilon.Internal.Parser where
 
@@ -13,11 +13,13 @@ import Epsilon.Internal.Classes
 import Prelude hiding ( MonadFail(..) )
 import qualified Data.Text as T ( empty )
 import Data.String
-import Debug.Trace
+-- import Debug.Trace
+import Data.Store
+import GHC.Generics hiding ( Fixity, Infix )
 
 ifThenElse :: Bool -> a -> a -> a
-ifThenElse True a b = a
-ifThenElse False a b = b
+ifThenElse True a _ = a
+ifThenElse False _ b = b
 
 newtype Parser a = Parser { runParser :: ParserState -> Either ParserState (ParserState, a) }
 
@@ -33,12 +35,12 @@ data ParserState = PS {
 type Environment = [(Text, EnvironmentEntry)]
 type BacklogEntry = (Int, Int, Text)
 
-data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show)
+data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show, Generic, Store)
 
 showE :: EpsilonType -> Text
 showE = pack . tail . show
 
-data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double | VFunction Text EnvironmentEntry deriving Show
+data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double | VFunction Text EnvironmentEntry deriving (Show, Generic, Store)
 
 data Expression = 
     Lookup Text                         |
@@ -47,7 +49,7 @@ data Expression =
     FloatLit Double                     |
     StringLit Text                      |
     ApplyFun Expression [Expression]
-        deriving Show
+        deriving (Show, Generic, Store)
 
 data Statement =
     VarSet Expression Expression              |
@@ -57,16 +59,16 @@ data Statement =
     Return Expression                         |
     Action Expression                         |
     EnvironmentChanged   
-        deriving Show
+        deriving (Show, Generic, Store)
 
 
 data EnvironmentEntry =
     Function { _fixity :: Maybe Fixity, _params :: [Param], _returnType :: EpsilonType, _statements :: Maybe [Statement] } |
     Value { _value :: Value, _etype :: EpsilonType }
-        deriving Show
+        deriving (Show, Generic, Store)
 
-data Fixity = Infix { getFixity :: Int} | InfixR { getFixity :: Int } | InfixL { getFixity :: Int } deriving (Eq, Show)
-data Param = Unnamed EpsilonType | Inferred Text | WellTyped EpsilonType Text deriving Show
+data Fixity = Infix { getFixity :: Int} | InfixR { getFixity :: Int } | InfixL { getFixity :: Int } deriving (Eq, Show, Generic, Store)
+data Param = Unnamed EpsilonType | Inferred Text | WellTyped EpsilonType Text deriving (Show, Generic, Store)
 
 
 makeLenses ''EnvironmentEntry
@@ -96,7 +98,7 @@ instance Monad Parser where
 
 
 instance MonadFail Parser where
-    fail s = Parser $ \st -> Left ((crashed .~ True) . (backlog %~ (:) (format s st) ) $ st)
+    fail tx = Parser $ \st -> Left ((crashed .~ True) . (backlog %~ (:) (format tx st) ) $ st)
         where
             format :: Text -> ParserState -> (Int, Int, Text)
             format s st = (st ^. lineNum, st ^. columnNum, foldr (<>) T.empty [s, " at line ", pack $ show (st ^. lineNum + 1), " at column ", pack $ show (st ^. columnNum + 1)])
@@ -227,7 +229,7 @@ groupOn f = groupBy ((==) `on` f)
 
 
 hierarchy :: [(Fixity,  Parser (a -> a -> a))] -> {- atom -}  Parser a -> {- l bracket -}  Parser b -> {- r bracket -}  Parser c -> Parser a
-hierarchy ops unit lbr rbr = hierarchy' (groupOn (getFixity . fst) $ sortOn (getFixity . fst) ops) (unit <|> between lbr rbr (hierarchy ops unit lbr rbr))
+hierarchy ops u lbrac rbrac = hierarchy' (groupOn (getFixity . fst) $ sortOn (getFixity . fst) ops) (u <|> between lbr rbr (hierarchy ops u lbrac rbrac))
     where
         hierarchy' :: [[(Fixity,  Parser (a -> a -> a))]] ->  Parser a ->  Parser a
         hierarchy' [] unit = unit
@@ -251,7 +253,7 @@ sepBy ::   Parser a ->  Parser b ->  Parser [a]
 sepBy v delim = sepBy1 v delim <|> pure []
 
 ws ::   Parser ()
-ws = many_ $ satisfy isSpace
+ws = many_ $ satisfy (\c -> isSpace c && c /= '\n')
 
 tok ::   Parser a ->  Parser a
 tok = (<* ws)
@@ -271,7 +273,7 @@ bool = True <$ seqOf "true" <|> False <$ seqOf "false"
 expression :: Parser Expression
 expression = do
     ws
-    ops <- getState <&> (\e -> [ (f, (\a b -> ApplyFun (Lookup name) [a, b]) <$ tok (seqOf name) ) | (name, Function { _fixity = Just f, ..}) <- e ^. environment])
+    ops <- getState <&> (\e -> [ (f, (\a b -> ApplyFun (Lookup name) [a, b]) <$ tok (seqOf name) ) | (name, Function { _fixity = Just f }) <- e ^. environment])
     tok $ hierarchy ops (
         FloatLit <$> tok float <|> 
         IntLit <$> tok signedInt <|> 
@@ -328,14 +330,14 @@ operator = do
     f <- tok unsignedInt
     name <- fmap pack $ tok $ many $ satisfy (\s -> not (isAlphaNum s) && s /= ')' && s /= '(' && s /= '[' && s /= ']' && s /= '{' && s /= '}' )
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as operator name"
-    (params, returnType, body) <- functionSignature $ null b
-    let fixity = case j of {
+    (ps, rt, body) <- functionSignature $ null b
+    let fx = case j of {
         Just 'l' -> InfixL f;
         Just 'r' -> InfixR f;
         _        -> Infix f;
     }
 
-    EnvironmentChanged <$ modify (over environment ((name, Function (Just fixity) params returnType (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
+    EnvironmentChanged <$ modify (over environment ((name, Function (Just fx) ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
     
 function :: Parser Statement
 function = do
@@ -344,13 +346,13 @@ function = do
     tok $ seqOf "function"
     name <- fmap pack $ tok $ many $ satisfy isAlpha
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as function name"   
-    (params, returnType, body) <- functionSignature $ null b
-    EnvironmentChanged <$ modify (over environment ((name, Function Nothing params returnType (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
+    (pr, rt, body) <- functionSignature $ null b
+    EnvironmentChanged <$ modify (over environment ((name, Function Nothing pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
 
 functionSignature :: Bool {- builtin -} -> Parser ([Param], EpsilonType, [Statement])
 functionSignature ib = do
     ws
-    params <- between (char' '(') (char' ')') $ sepBy1 (do
+    pr <- between (char' '(') (char' ')') $ sepBy1 (do
             ps <- sepBy1 (fmap pack $ tok $ many $ satisfy $ isAlpha) (char' ':')
             case ps of
                 []           -> fail "Empty parameter in function or operator declaration"
@@ -362,8 +364,8 @@ functionSignature ib = do
     char' ':'
     t <- toType <$> (fmap pack $ tok $ many $ satisfy isAlpha)
     case ib of
-        False -> pure $ (params, t, [])
-        True -> (\s -> (params, t, s)) <$> between (char' '{') (char' '}') multiS
+        False -> pure $ (pr, t, [])
+        True -> (\s -> (pr, t, s)) <$> between (char' '{') (char' '}') multiS
 
 toType :: Text -> EpsilonType
 toType "int" = TInt
@@ -371,6 +373,7 @@ toType "bool" = TBool
 toType "float" = TFloat
 toType "string" = TString
 toType "void" = TVoid
+toType _ = undefined
 
 statement :: Parser Statement
 statement = assign <|> while <|> ifElse <|> ifS <|> operator <|> function <|> returnStatement <|> Action <$> expression <|> fail "Failed to parse statement"
@@ -383,7 +386,7 @@ returnStatement = do
 
 
 multiS :: Parser [Statement]
-multiS = many statement --sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
+multiS = sepBy statement $ char '\n' --sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
 
 eof :: Parser ()
 eof = Parser $ \st -> case uncons (st ^. string) of

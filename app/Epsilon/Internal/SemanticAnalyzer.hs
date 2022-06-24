@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, LambdaCase #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, LambdaCase, DeriveAnyClass #-}
 module Epsilon.Internal.SemanticAnalyzer where
 
 import Control.Applicative
@@ -6,16 +6,23 @@ import Optics
 import Epsilon.Internal.Classes
 import Epsilon.Internal.Parser hiding ( environment, modify )
 import Control.Monad hiding ( MonadFail(..) )
-import Prelude hiding ( MonadFail(..) )
+import Prelude hiding ( MonadFail(..), exp )
 import Data.Text ( Text )
-import Debug.Trace
+-- import Debug.Trace
 import Data.List
+import Data.Store
 import Data.Function
+import GHC.Generics
 
 newtype SemanticAnalyzer a = SemanticAnalyzer { runAnalyzer :: AnalyzerState -> Either AnalyzerState (AnalyzerState, a )}
 
-data Severity = Note | Warn | Err deriving Show
+data Severity = Note | Warn | Err deriving (Generic, Store)
 data Handling = Ignore | Warning | Error | TryFix
+
+instance Show Severity where
+    show Note = "Note"
+    show Warn = "Warning"
+    show Err = "Error"
 
 type TypeTable = [(Text, (Bool, EpsilonType))]
 
@@ -24,12 +31,12 @@ data AnalyzerState = AS {
     _environment :: Environment,
     _typeTable :: TypeTable,
     _currReturnType :: EpsilonType
-} deriving Show
+} deriving (Show, Generic, Store)
 
 makeLenses ''AnalyzerState
 
 instance Semigroup AnalyzerState where
-    AS i e t c <> AS i2 e2 t2 c2 = AS (i ++ i2) e2 t2 c2
+    AS i _ _ _ <> AS i2 e2 t2 c2 = AS (i ++ i2) e2 t2 c2
 
 instance Monoid AnalyzerState where
     mempty = AS [] [] [] TVoid
@@ -42,9 +49,9 @@ put :: AnalyzerState -> SemanticAnalyzer ()
 put st = SemanticAnalyzer $ const $ Right (st, ())
 
 warn :: Text -> SemanticAnalyzer ()
-warn s = SemanticAnalyzer $ \st -> Right $ (over issues ((Warn, format s st) :) $ st, ())
+warn tx = SemanticAnalyzer $ \st -> Right $ (over issues ((Warn, format tx st) :) $ st, ())
         where
-            format s st = s
+            format s _ = s
 
 instance Functor SemanticAnalyzer where
     fmap f (SemanticAnalyzer p) = SemanticAnalyzer $ fmap (over _2 f) . p
@@ -71,9 +78,9 @@ instance MonadPlus SemanticAnalyzer where
     mplus = (<|>)
 
 instance MonadFail SemanticAnalyzer where
-    fail s = SemanticAnalyzer $ \st -> Left $ over issues ((Err, format s st) :) $ st
+    fail tx = SemanticAnalyzer $ \st -> Left $ over issues ((Err, format tx st) :) $ st
         where
-            format s st = s
+            format s _ = s
 
 
 
@@ -94,18 +101,21 @@ typeOf (ApplyFun (Lookup s) exps) = do
     st <- get
     case lookup s (st ^. environment) of
         Nothing -> fail $ "Function not in scope: " <> s
-        Just (Function _ ps t _)  -> t <$ (checkForMatch ps exps)
+        Just (Function _ prs t _)  -> t <$ (checkForMatch prs exps)
             where
                 checkForMatch [] [] = pure ()
                 checkForMatch (_:_) [] = fail $ "Not enough supplied parameters in function: " <> s
                 checkForMatch [] (_:_) = fail $ "Too many supplied parameters in function: " <> s
                 checkForMatch (p:ps) (x:xs) = do
-                    t <- typeOf x
+                    t'' <- typeOf x
                     case p of
-                        Unnamed t' -> guard (t == t') <|> fail ("Couldn't match expected type " <> showE t' <> " with actual type " <> showE t)
-                        WellTyped t' n -> guard (t == t') <|> fail ("Couldn't match expected type " <> showE t' <> " with actual type " <> showE t <> " of parameter '" <> n <> "'")
+                        Unnamed t' -> guard (t'' == t') <|> fail ("Couldn't match expected type " <> showE t' <> " with actual type " <> showE t'')
+                        WellTyped t' n -> guard (t'' == t') <|> fail ("Couldn't match expected type " <> showE t' <> " with actual type " <> showE t'' <> " of parameter '" <> n <> "'")
                         Inferred n -> warn $ "Can't typecheck inferred parameter at compile time of parameter '" <> n <> "'"
                     checkForMatch ps xs
+        _ -> undefined
+typeOf _ = undefined
+
 
 
 analyze :: [Statement] -> SemanticAnalyzer [Statement]
@@ -157,13 +167,14 @@ analyze (s:ss) = case s of
         case ss of
             [] -> pure []
             _  -> [] <$ warn "Excess statements after return will be omitted"
-    VarSet (Lookup s) exp -> do
+    VarSet (Lookup str) exp -> do
         st <- get
         t <- typeOf exp
-        case lookup s (st ^. typeTable) of
-            Nothing -> modify (over typeTable $ (:) (s, (False, t)) )
-            Just (_, t') -> guard (t == t') <|> fail ("Couldn't match type " <> showE t' <> " with type " <> showE t <> " of variable '" <> s <> "'")
-        (VarSet (Lookup s) exp :) <$> analyze ss
+        case lookup str (st ^. typeTable) of
+            Nothing -> modify (over typeTable $ (:) (str, (False, t)) )
+            Just (_, t') -> guard (t == t') <|> fail ("Couldn't match type " <> showE t' <> " with type " <> showE t <> " of variable '" <> str <> "'")
+        (VarSet (Lookup str) exp :) <$> analyze ss
+    _ -> undefined
 
     
 lifetimeCheck :: SemanticAnalyzer ()

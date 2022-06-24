@@ -14,6 +14,9 @@ data EpsilonFlags =
     AutomaticBuiltins
     deriving (Eq, Show)
 
+version :: Text
+version = "0.0.1.0"
+
 shorthands :: [(Text, EpsilonFlags)]
 shorthands = [
     ("pp", PrettyPrint),

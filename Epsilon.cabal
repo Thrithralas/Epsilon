@@ -21,19 +21,28 @@ extra-source-files: CHANGELOG.md
 executable Epsilon
     main-is:          Main.hs
 
+    ghc-options:
+        -O2
+        -Wall
+        -Wno-name-shadowing
+
     -- Modules included in this executable, other than Main.
     other-modules:
         Epsilon.Internal.Parser,
         Epsilon.Internal.Interpreter,
         Epsilon.Internal.SemanticAnalyzer,
-        Epsilon.Internal.Classes
+        Epsilon.Internal.Classes,
+        Epsilon.Serialization,
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
     build-depends:    
         base ^>= 4.16.1.0,
-        optics ^>= 0.4.2,
-        text ^>= 2.0
+        optics,
+        text,
+        store,
+        bytestring,
+        ansi-terminal
         
     hs-source-dirs:   app
     default-language: GHC2021
