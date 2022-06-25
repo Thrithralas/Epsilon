@@ -2,31 +2,24 @@
 
 module Epsilon.Internal.Interpreter where
 
-import Epsilon.Internal.Parser hiding ( modify, _environment, environment, _backlog, backlog, _crashed, crashed )
-import Epsilon.Internal.SemanticAnalyzer hiding ( modify, _environment, environment, get, put, typeOf )
-import Control.Monad.IO.Class
-import Control.Applicative
 import Control.Monad hiding ( MonadFail(..) )
-import Optics
-import qualified Epsilon.Internal.Parser as EIP
-import qualified Epsilon.Internal.SemanticAnalyzer as EIS
-import Debug.Trace
-import Data.Text hiding ( empty, zip, foldl, foldl1, foldr )
-import Epsilon.Internal.Classes
-import Prelude hiding ( MonadFail(..), putStrLn )
-import Data.Text.IO
+import Control.Applicative
+import Control.Monad.IO.Class
 import Data.String
-import Data.List ( maximumBy )
-import qualified Data.Text as DT ( empty )
+import Data.Text hiding ( empty, zip, foldl, foldl1, foldr, filter )
+import Data.Text.IO
+import Epsilon.Internal.Classes
+import Optics
+import Prelude hiding ( MonadFail(..), putStrLn )
 
-newtype Interpreter m a = Interpreter { runInterpreter :: InterpreterState -> m (Either InterpreterState (InterpreterState, a))}
+newtype Interpreter m a = Interpreter { runInterpreter :: InterpreterState -> m (Either InterpreterState (InterpreterState, a)) }
 
 data InterpreterState = IS {
     _environment :: Environment,
     _backlog :: [Text],
     _stacktrace :: [Text],
     _crashed :: Bool
-} deriving Show
+}
 
 instance Semigroup InterpreterState where
 
@@ -35,22 +28,13 @@ instance Monoid InterpreterState where
 
 makeLenses ''InterpreterState
 
-get :: Applicative m => Interpreter m InterpreterState
-get = Interpreter $ \s -> pure $ pure (s,s)
-
-getEnv :: Applicative m => Interpreter m Environment
+getEnv :: Interpreter IO Environment
 getEnv = (^. environment) <$> get
 
-put :: Applicative m => InterpreterState -> Interpreter m ()
-put s = Interpreter $ const $ pure $ pure (s,())
-
-putEnv :: Monad m => Environment -> Interpreter m ()
+putEnv :: Environment -> Interpreter IO ()
 putEnv e = modify (environment .~ e)
 
-modify :: Monad m => (InterpreterState -> InterpreterState) -> Interpreter m ()
-modify f = get >>= put . f
-
-modifyEnv :: Monad m => (Environment -> Environment) -> Interpreter m ()
+modifyEnv :: (Environment -> Environment) -> Interpreter IO ()
 modifyEnv f = modify (over environment f)
 
 instance Functor m => Functor (Interpreter m) where
@@ -93,6 +77,20 @@ instance Monad m => MonadFail (Interpreter m) where
         where
             format s st = s <> "\nSTACK TRACE:\n\t" <> intercalate "\n\t" (st ^. stacktrace ++ ["<top level>"])
 
+instance EpsilonModule (Interpreter IO) InterpreterState IO where
+    runModule st s = do
+        l <- runInterpreter st s
+        pure $ case l of
+            Left l -> (l ^. environment, l ^. backlog, Nothing)
+            Right (r,a) -> (r ^. environment, [], Just a)
+    ctor f = Interpreter $ \st -> Right <$> f st
+    error = fail
+    warn = fail
+    get = Interpreter $ \s -> pure $ Right $ (s,s)
+    put s = Interpreter $ const $ pure $ Right (s,())
+
+
+
 handleBuiltin :: (MonadIO m, MonadFail m) => Text {- name -} -> [Value] -> Interpreter m Value
 handleBuiltin s vs = case (s, vs) of
     ("+", [VInt a, VInt b]) -> pure $ VInt $ a + b
@@ -109,7 +107,7 @@ handleBuiltin s vs = case (s, vs) of
     ("printStr", [VString s]) -> VVoid <$ liftIO (putStrLn s)
     _ -> fail $ "No pattern for builtin function '" <> s <> "'"
 
-evalExp :: (MonadIO m, MonadFail m) => Expression -> Interpreter m Value
+evalExp :: Expression -> Interpreter IO Value
 evalExp = \case
     IntLit i -> pure $ VInt i
     StringLit s -> pure $ VString s
@@ -122,15 +120,16 @@ evalExp = \case
             Just (Value l _) -> pure l
             Just fe        -> pure $ VFunction s fe
             _              -> fail $ "No entry with name '" <> s <> "'"
-    ApplyFun x@(Lookup s) params -> do
+    ApplyFun x@(Lookup _) params -> do
         func <- evalExp x
         vals <- mapM evalExp params
         case func of
             VFunction s (Function _ ps r (Just instrs)) -> runFunction (zip vals ps) instrs s r
             VFunction s (Function _ _ _ Nothing) -> handleBuiltin s vals
             _ -> fail "Expression does not reference a function"
+    ApplyFun _ _ -> fail "Function invocation for non-lookup expressions is not supported"
 
-runFunction :: (MonadIO m, MonadFail m) => [(Value, Param)] -> [Statement] -> Text {- name -} -> EpsilonType {- returnType -} -> Interpreter m Value
+runFunction :: [(Value, Param)] -> [Statement] -> Text {- name -} -> EpsilonType {- returnType -} -> Interpreter IO Value
 runFunction vps func n rt = do
     e <- getEnv
     forM_ vps (\(val, par) -> case par of
@@ -154,7 +153,7 @@ runFunction vps func n rt = do
     
      
 
-interpretStatements :: (MonadIO m, MonadFail m) => [Statement] -> Interpreter m ()
+interpretStatements :: [Statement] -> Interpreter IO ()
 interpretStatements = mapM_ evalStatement
 
 typeOf :: Value -> EpsilonType
@@ -163,6 +162,7 @@ typeOf (VBool _) = TBool
 typeOf (VString _) = TString
 typeOf (VFloat _) = TFloat
 typeOf (VVoid) = TVoid
+typeOf (VFunction _ _) = TFunction
 
 
 updateEnvironment :: MonadFail m => Text -> Value -> Environment -> Interpreter m Environment
@@ -174,7 +174,7 @@ updateEnvironment s v (x@(s',v'):xs)
         _    -> fail $ "Couldn't match type " <> (pack $ show t) <> " (ILT: " <> (pack $ show  v'') <> ") of field '" <> s <> "' with actual type " <> (pack $ show $ typeOf v)
     | otherwise = fmap (x:) $ updateEnvironment s v xs
 
-evalStatement :: (MonadIO m, MonadFail m) => Statement -> Interpreter m ()
+evalStatement :: Statement -> Interpreter IO ()
 evalStatement s = do
     envir <- getEnv
     case lookup "$RETURN" envir of
@@ -199,28 +199,9 @@ evalStatement s = do
                         x <- evalExp exp
                         e <- getEnv
                         updateEnvironment "$RETURN" x e >>= putEnv
-                    EnvironmentChanged -> pure ()           
+                    EnvironmentChanged -> pure ()
+                    VarSet _ _ -> fail "Cannot override literal value"          
 
 
-parseThenInterpret :: (MonadFail m, MonadIO m) => Text -> Environment -> m ()
-parseThenInterpret s env = case runParser program ((EIP.string .~ s) . (EIP.environment .~ env) $ mempty) of
-    Left (PS { _backlog = bl, .. }) -> liftIO $ putStrLn $ "PARSE ERROR:\n\t" <> ((\(_,_,b) -> b) $ maximumBy orderLogs bl)
-    Right (PS { _environment = env, ..}, sts) -> case runAnalyzer (analyzeProgramm sts) (EIS.environment .~ env $ mempty) of
-        Left (AS { _issues = i, .. }) -> liftIO $ putStrLn $ "SEMANTIC ANALYZER ERROR:\n\t" <> foldr (\(s,t) acc -> "[" <> toUpper (pack $ show s) <> "] " <> t <> "\n\t") DT.empty i
-        Right (AS { _issues = i, .. }, sts) -> do
-            liftIO $ putStrLn $ "SEMANTIC ANALYZER COMPLETE:\n\t" <> foldr (\(s,t) acc -> "[" <> toUpper (pack $ show s) <> "] " <> t <> "\n\t") DT.empty i
-            runInterpreter (interpretStatements sts) (environment .~ env $ mempty) >>= (\case
-                Left (IS { _backlog = bl }) -> liftIO $ putStrLn $ foldl (\acc a -> acc <> "\n\t" <> a) "RUNTIME ERROR: " bl
-                Right _                     -> pure ()
-                )
-    where
-        orderLogs (a,b,s) (d,c,s2)
-            | a == d && b == c = case isPrefixOf "<" s of
-                True -> LT
-                False -> case isPrefixOf "<" s2 of
-                    True -> GT
-                    False -> EQ
-            | a > d || (a == d && b > c) = GT
-            | otherwise = LT
-        
-
+withEnvI :: Environment -> InterpreterState
+withEnvI env = (environment .~ env) mempty

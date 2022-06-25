@@ -3,11 +3,14 @@ module Main where
 
 import Epsilon.Internal.Interpreter
 import System.Environment
-import Epsilon.Internal.Parser
-import Control.Monad
+import Epsilon.Internal.Classes
+import Control.Monad hiding ( fail )
 import Data.Text ( Text, pack, uncons, unpack, concat )
-import Data.Text.IO ( readFile )
-import Prelude hiding ( readFile, concat )
+import Data.Text.IO ( readFile, putStrLn )
+import Prelude hiding ( readFile, concat, fail, putStrLn )
+import Epsilon.Internal.Parser
+import Control.Applicative
+import Epsilon.Internal.SemanticAnalyzer
 
 data EpsilonFlags =
     PrettyPrint |
@@ -51,11 +54,25 @@ autoEnv = [
     ("printStr", Function Nothing [Unnamed TString] TVoid Nothing)
     ]
 
+fromJustIO :: Maybe a -> IO a
+fromJustIO = foldr ((<|>) . pure) (fail "Main.fromJustIO: empty Maybe")
+
 main :: IO ()
-main = do
+main = (do
     args <- getArgs
     let (files, flags) = match (fmap pack args)
     let env = if elem AutomaticBuiltins flags then autoEnv else []
     contents <- concat <$> mapM readFile (fmap unpack files)
-    parseThenInterpret contents env
-    
+
+    (env', ers, sts) <- runModule program (withStringAndEnv contents env)
+    guard (not $ null sts) <|> putStrLn ("PARSE ERROR:\n\t" <> head ers) *> empty
+    sts' <- fromJustIO sts
+
+    (env'', ers', sts'') <- runModule (analyzeProgramm sts') (withEnvSA env')
+    guard (not $ null sts'') <|> putStrLn ("SEMANTIC ANALYSIS ERROR:" <> foldr (\a acc -> acc <> "\n\t" <> a) "" ers') *> empty
+    when (not $ null ers') $ putStrLn $ "SEMANTIC ANALYSIS COMPLETE:" <> foldr (\a acc -> acc <> "\n\t" <> a) "" ers' 
+    sts''' <- fromJustIO sts''
+
+    (_, ers'', _) <- runModule (interpretStatements sts''') (withEnvI env'')
+    guard (not $ null ers'') <|> putStrLn ("RUNTIME ERROR:\n\t" <> head ers'') *> empty
+    ) <|> pure ()

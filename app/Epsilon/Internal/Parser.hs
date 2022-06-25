@@ -3,23 +3,17 @@
 module Epsilon.Internal.Parser where
 
 import Optics hiding ( assign, uncons )
-import Data.List hiding ( tail, uncons )
-import Control.Applicative
+import Data.List hiding ( tail, uncons, isPrefixOf )
 import Control.Monad hiding ( MonadFail(..) )
 import Data.Char
 import Data.Function
-import Data.Text ( Text, pack, uncons, unpack )
+import Data.Text ( Text, pack, uncons, unpack, isPrefixOf )
 import Epsilon.Internal.Classes
-import Prelude hiding ( MonadFail(..) )
+import Prelude hiding ( MonadFail(..), error )
 import qualified Data.Text as T ( empty )
 import Data.String
+import Control.Applicative
 -- import Debug.Trace
-import Data.Store
-import GHC.Generics hiding ( Fixity, Infix )
-
-ifThenElse :: Bool -> a -> a -> a
-ifThenElse True a _ = a
-ifThenElse False _ b = b
 
 newtype Parser a = Parser { runParser :: ParserState -> Either ParserState (ParserState, a) }
 
@@ -31,45 +25,6 @@ data ParserState = PS {
     _columnNum :: Int,
     _crashed :: Bool
 } deriving Show
-
-type Environment = [(Text, EnvironmentEntry)]
-type BacklogEntry = (Int, Int, Text)
-
-data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show, Generic, Store)
-
-showE :: EpsilonType -> Text
-showE = pack . tail . show
-
-data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double | VFunction Text EnvironmentEntry deriving (Show, Generic, Store)
-
-data Expression = 
-    Lookup Text                         |
-    IntLit Integer                      |
-    BoolLit Bool                        |
-    FloatLit Double                     |
-    StringLit Text                      |
-    ApplyFun Expression [Expression]
-        deriving (Show, Generic, Store)
-
-data Statement =
-    VarSet Expression Expression              |
-    If Expression [Statement]                 |
-    IfElse Expression [Statement] [Statement] |
-    While Expression [Statement]              |
-    Return Expression                         |
-    Action Expression                         |
-    EnvironmentChanged   
-        deriving (Show, Generic, Store)
-
-
-data EnvironmentEntry =
-    Function { _fixity :: Maybe Fixity, _params :: [Param], _returnType :: EpsilonType, _statements :: Maybe [Statement] } |
-    Value { _value :: Value, _etype :: EpsilonType }
-        deriving (Show, Generic, Store)
-
-data Fixity = Infix { getFixity :: Int} | InfixR { getFixity :: Int } | InfixL { getFixity :: Int } deriving (Eq, Show, Generic, Store)
-data Param = Unnamed EpsilonType | Inferred Text | WellTyped EpsilonType Text deriving (Show, Generic, Store)
-
 
 makeLenses ''EnvironmentEntry
 makeLenses ''ParserState
@@ -91,6 +46,35 @@ instance Alternative Parser where
             Right pr -> Right $ over _1 (l1 <>) pr
         Right pa -> Right pa
 
+instance MonadPlus Parser where
+    mplus = (<|>)
+    mzero = empty
+
+instance EpsilonModule Parser ParserState (Either ParserState) where
+    runModule s st = case runParser s st of
+        Left l -> pure (l ^. environment, getBacklog (l ^. backlog), Nothing)
+        Right (r,a) -> pure (r ^. environment, getBacklog (r ^. backlog), Just a)
+        where
+            getBacklog = (:[]) . (\(_,_,b) -> b) . maximumBy orderLogs
+            orderLogs (a,b,s) (d,c,s2)
+                | a == d && b == c = case isPrefixOf "<" s of
+                    True -> LT
+                    False -> case isPrefixOf "<" s2 of
+                        True -> GT
+                        False -> EQ
+                | a > d || (a == d && b > c) = GT
+                | otherwise = LT
+    ctor = Parser
+    warn = error
+    put ps = Parser $ const $ Right (ps, ())
+    get = Parser $ \ps -> Right (ps,ps)
+    error tx = Parser $ \st -> Left ((crashed .~ True) . (backlog %~ (:) (format tx st) ) $ st)
+        where
+            format :: Text -> ParserState -> (Int, Int, Text)
+            format s st = (st ^. lineNum, st ^. columnNum, foldr (<>) T.empty [s, " at line ", pack $ show (st ^. lineNum + 1), " at column ", pack $ show (st ^. columnNum + 1)])
+
+
+
 instance Monad Parser where
     Parser p >>= f = Parser $ \ps -> case p ps of
         Left l -> Left l
@@ -103,9 +87,6 @@ instance MonadFail Parser where
             format :: Text -> ParserState -> (Int, Int, Text)
             format s st = (st ^. lineNum, st ^. columnNum, foldr (<>) T.empty [s, " at line ", pack $ show (st ^. lineNum + 1), " at column ", pack $ show (st ^. columnNum + 1)])
 
-instance MonadPlus Parser where
-    mzero = empty
-    mplus = (<|>)
 
 instance Semigroup ParserState where
     ps1 <> ps2 = over backlog (\l -> union l (ps1 ^. backlog)) $ ps2
@@ -114,20 +95,11 @@ instance Semigroup ParserState where
 instance Monoid ParserState where
     mempty = PS [] [] "" 0 0 False
 
-getState :: Parser ParserState
-getState = Parser $ \ps -> Right (ps,ps)
-
-setState :: ParserState -> Parser ()
-setState ps = Parser $ const $ Right (ps, ())
-
-modify :: (ParserState -> ParserState) -> Parser ()
-modify f = getState >>= setState . f
-
 satisfy :: (Char -> Bool) -> Parser Char
 satisfy p = do
-    ps <- getState
+    ps <- get
     case uncons (ps ^. string) of
-        Just (c,cs) | p c -> c <$ setState ((string .~ cs) . (lineNum %~ lnump) . (columnNum %~ cnump) $ ps)
+        Just (c,cs) | p c -> c <$ put ((string .~ cs) . (lineNum %~ lnump) . (columnNum %~ cnump) $ ps)
             where
                 lnump v = case c of
                     '\n'          -> v + 1
@@ -168,12 +140,6 @@ float = do
             <$> some ((\a -> fromInteger $ toInteger $ ord a - ord '0') <$> satisfy isDigit) 
             <|> fail "Incomplete floating point number"
 
-
-many_ :: Alternative f => f a -> f ()
-many_ = void . many
-
-some_ :: Alternative f => f a -> f ()
-some_ = void . some
 
 between :: Parser a -> Parser c -> Parser b -> Parser b
 between l r m = l *> m <* r
@@ -253,7 +219,7 @@ sepBy ::   Parser a ->  Parser b ->  Parser [a]
 sepBy v delim = sepBy1 v delim <|> pure []
 
 ws ::   Parser ()
-ws = many_ $ satisfy (\c -> isSpace c && c /= '\n')
+ws = void $ many $ satisfy (\c -> isSpace c && c /= '\n')
 
 tok ::   Parser a ->  Parser a
 tok = (<* ws)
@@ -273,7 +239,7 @@ bool = True <$ seqOf "true" <|> False <$ seqOf "false"
 expression :: Parser Expression
 expression = do
     ws
-    ops <- getState <&> (\e -> [ (f, (\a b -> ApplyFun (Lookup name) [a, b]) <$ tok (seqOf name) ) | (name, Function { _fixity = Just f }) <- e ^. environment])
+    ops <- get <&> (\e -> [ (f, (\a b -> ApplyFun (Lookup name) [a, b]) <$ tok (seqOf name) ) | (name, Function { _fixity = Just f }) <- e ^. environment])
     tok $ hierarchy ops (
         FloatLit <$> tok float <|> 
         IntLit <$> tok signedInt <|> 
@@ -396,3 +362,6 @@ eof = Parser $ \st -> case uncons (st ^. string) of
 
 program :: Parser [Statement]
 program = ws *> multiS <* eof
+
+withStringAndEnv :: Text -> Environment -> ParserState
+withStringAndEnv tx env = (string .~ tx) . (environment .~ env) $ mempty

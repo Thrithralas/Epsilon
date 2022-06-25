@@ -2,14 +2,13 @@
 module Epsilon.Internal.SemanticAnalyzer where
 
 import Control.Applicative
-import Optics
+import Optics hiding ( uncons )
 import Epsilon.Internal.Classes
-import Epsilon.Internal.Parser hiding ( environment, modify )
 import Control.Monad hiding ( MonadFail(..) )
 import Prelude hiding ( MonadFail(..), exp )
-import Data.Text ( Text )
+import Data.Text ( Text, uncons )
 -- import Debug.Trace
-import Data.List
+import Data.List hiding ( uncons )
 import Data.Store
 import Data.Function
 import GHC.Generics
@@ -41,18 +40,6 @@ instance Semigroup AnalyzerState where
 instance Monoid AnalyzerState where
     mempty = AS [] [] [] TVoid
 
-
-get :: SemanticAnalyzer AnalyzerState
-get = SemanticAnalyzer $ \st -> Right (st,st)
-
-put :: AnalyzerState -> SemanticAnalyzer ()
-put st = SemanticAnalyzer $ const $ Right (st, ())
-
-warn :: Text -> SemanticAnalyzer ()
-warn tx = SemanticAnalyzer $ \st -> Right $ (over issues ((Warn, format tx st) :) $ st, ())
-        where
-            format s _ = s
-
 instance Functor SemanticAnalyzer where
     fmap f (SemanticAnalyzer p) = SemanticAnalyzer $ fmap (over _2 f) . p
 
@@ -82,10 +69,27 @@ instance MonadFail SemanticAnalyzer where
         where
             format s _ = s
 
+instance EpsilonModule SemanticAnalyzer AnalyzerState (Either AnalyzerState) where
+    runModule st s = case runAnalyzer st s of
+        Left l -> pure (l ^. environment, getBacklog (l ^. issues), Nothing)
+        Right (r,a) -> pure (r ^. environment, getBacklog (r ^. issues), Just a)
+        where
+            getBacklog = foldMap (uncurry format)
+            format sev s = case uncons s of
+                Just ('<',_) -> []
+                Just _       -> [format' sev s]
+                _            -> []
+            format' Err a = "\x1b[31m[Error] " <> a <> "\x1b[0m"
+            format' Warn a = "\x1b[33m[Warning] " <> a <> "\x1b[0m"
+            format' Note a = "[Note]" <> a
+    error = fail
+    ctor = SemanticAnalyzer
+    put ps = SemanticAnalyzer $ const $ Right (ps, ())
+    get = SemanticAnalyzer $ \ps -> Right (ps,ps)
+    warn tx = SemanticAnalyzer $ \st -> Right $ (over issues ((Warn, format tx st) :) $ st, ())
+        where
+            format s _ = s
 
-
-modify :: (AnalyzerState -> AnalyzerState) -> SemanticAnalyzer ()
-modify f = get >>= put . f
 
 typeOf :: Expression -> SemanticAnalyzer EpsilonType
 typeOf (IntLit _)  = pure TInt
@@ -184,3 +188,6 @@ lifetimeCheck = do
 
 analyzeProgramm :: [Statement] -> SemanticAnalyzer [Statement]
 analyzeProgramm st = analyze st <* lifetimeCheck
+
+withEnvSA :: Environment -> AnalyzerState
+withEnvSA env = (environment .~ env) mempty
