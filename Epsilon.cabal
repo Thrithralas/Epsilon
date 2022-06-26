@@ -42,7 +42,7 @@ executable Epsilon
         text,
         store,
         bytestring,
-        ansi-terminal
+        containers
         
     hs-source-dirs:   app
     default-language: GHC2021

@@ -10,7 +10,8 @@ import Data.Text hiding ( empty, zip, foldl, foldl1, foldr, filter )
 import Data.Text.IO
 import Epsilon.Internal.Classes
 import Optics
-import Prelude hiding ( MonadFail(..), putStrLn )
+import Prelude hiding ( MonadFail(..), putStrLn, lookup )
+import Data.Map.Strict as Map
 
 newtype Interpreter m a = Interpreter { runInterpreter :: InterpreterState -> m (Either InterpreterState (InterpreterState, a)) }
 
@@ -24,7 +25,7 @@ data InterpreterState = IS {
 instance Semigroup InterpreterState where
 
 instance Monoid InterpreterState where
-    mempty = IS [] [] [] False
+    mempty = IS mempty [] [] False
 
 makeLenses ''InterpreterState
 
@@ -66,7 +67,7 @@ instance Monad m => Alternative (Interpreter m) where
         )
 
 instance MonadPlus m => MonadPlus (Interpreter m) where
-    mzero = empty
+    mzero = Control.Applicative.empty
     mplus = (<|>)
 
 instance MonadIO m => MonadIO (Interpreter m) where
@@ -116,17 +117,16 @@ evalExp = \case
     Lookup s -> do
         st <- get
         --trace (show $ map fst $ _environment st) $ pure ()
-        case lookup s (st ^. environment) of
-            Just (Value l _) -> pure l
-            Just fe        -> pure $ VFunction s fe
+        case lookup s (st ^. (environment % valTable)) of
+            Just (l,_) -> pure l
             _              -> fail $ "No entry with name '" <> s <> "'"
-    ApplyFun x@(Lookup _) params -> do
-        func <- evalExp x
+    ApplyFun (Lookup s) params -> do
+        env <- getEnv <&> (^. functionTable)
         vals <- mapM evalExp params
-        case func of
-            VFunction s (Function _ ps r (Just instrs)) -> runFunction (zip vals ps) instrs s r
-            VFunction s (Function _ _ _ Nothing) -> handleBuiltin s vals
-            _ -> fail "Expression does not reference a function"
+        case env !? s of
+            Just (MkFunction _ ps r (Just instrs)) -> runFunction (zip vals ps) instrs s r
+            Just (MkFunction _ _ _ Nothing) -> handleBuiltin s vals
+            _ -> fail $  "Expression does not reference a function " <> (pack $ show s)
     ApplyFun _ _ -> fail "Function invocation for non-lookup expressions is not supported"
 
 runFunction :: [(Value, Param)] -> [Statement] -> Text {- name -} -> EpsilonType {- returnType -} -> Interpreter IO Value
@@ -134,16 +134,16 @@ runFunction vps func n rt = do
     e <- getEnv
     forM_ vps (\(val, par) -> case par of
         Unnamed _ -> fail "Unnamed params not allowed in non-builtin function or operator"
-        WellTyped t n -> if typeOf val == t then modifyEnv ((n, Value val t) :) else fail $ "Couldn't match type " <> showE t <> " of parameter '" <> n <> "' with actual type " <> showE (typeOf val) <> "\n\tin the function invocation of " <> n
-        Inferred n -> modifyEnv ((n, Value val (typeOf val)) :)
+        WellTyped t n | t == typeOf val -> modifyEnv (over valTable $ insert n (val, t))
+        WellTyped t n -> fail $ "Couldn't match type " <> showE t <> " of parameter '" <> n <> "' with actual type " <> showE (typeOf val) <> "\n\tin the function invocation of " <> n
+        Inferred n -> modifyEnv (over valTable $ insert n (val, typeOf val))
         )
     modify $ over stacktrace ((:) $ n <> "(" <> intercalate " , " (fmap showType vps) <> ")")
     interpretStatements func
-    e' <- getEnv
+    e' <- getEnv <&> (^. valTable)
     putEnv $ e --drop (length e' - length e) e'
     case lookup "$RETURN" e' of
-        Just (Value v t) -> if t == rt then pure v else fail $ "Couldn't match type " <> showE t <> " with return type " <> showE rt <> "\n\tin the function invocation of " <> n
-        Just _ -> fail "Illegal return value"
+        Just (v,t) -> if t == rt then pure v else fail $ "Couldn't match type " <> showE t <> " with return type " <> showE rt <> "\n\tin the function invocation of " <> n
         _ | rt == TVoid -> pure VVoid
         _               -> fail $ "Missing non-void return value of type " <> showE rt <> "\n\tin the function invocation of " <> n
     where
@@ -162,28 +162,35 @@ typeOf (VBool _) = TBool
 typeOf (VString _) = TString
 typeOf (VFloat _) = TFloat
 typeOf (VVoid) = TVoid
-typeOf (VFunction _ _) = TFunction
 
 
-updateEnvironment :: MonadFail m => Text -> Value -> Environment -> Interpreter m Environment
-updateEnvironment s v [] = pure [(s, Value v (typeOf v))]
+updateEnvironment :: MonadFail m => Text -> Value -> (Map Text (Value, EpsilonType)) -> Interpreter m (Map Text (Value, EpsilonType))
+updateEnvironment s v map | Just (_,t) <- map !? s = 
+    if t == typeOf v 
+    then pure (insert s (v,t) map) 
+    else fail $ "Couldn't match type " <> (pack $ show t) <> " of field '" <> s <> "' with actual type " <> (pack $ show $ typeOf v) 
+updateEnvironment s v map = pure $ insert s (v, typeOf v) map
+
+{-
+[] = pure [(s, Value v (typeOf v))]
 updateEnvironment s v (x@(s',v'):xs)
     | s /= s' = fmap (x:) $ updateEnvironment s v xs
     | Value v'' t <- v' = case t == typeOf v of
         True -> pure $ (s, Value v t) : xs
         _    -> fail $ "Couldn't match type " <> (pack $ show t) <> " (ILT: " <> (pack $ show  v'') <> ") of field '" <> s <> "' with actual type " <> (pack $ show $ typeOf v)
     | otherwise = fmap (x:) $ updateEnvironment s v xs
+-}
 
 evalStatement :: Statement -> Interpreter IO ()
 evalStatement s = do
-    envir <- getEnv
+    envir <- getEnv <&> (^. valTable)
     case lookup "$RETURN" envir of
         Just _ -> pure ()
         _      -> case s of
                     VarSet (Lookup l) res -> do
                         exp <- evalExp res
-                        e <- getEnv
-                        updateEnvironment l exp e >>= putEnv
+                        e <- getEnv <&> (^. valTable)
+                        updateEnvironment l exp e >>= modifyEnv . (valTable .~)
                     If exp st -> do
                         VBool b <- evalExp exp
                         if b then interpretStatements st else pure ()
@@ -197,10 +204,11 @@ evalStatement s = do
                         void $ evalExp exp
                     Return exp -> do
                         x <- evalExp exp
-                        e <- getEnv
-                        updateEnvironment "$RETURN" x e >>= putEnv
+                        e <- getEnv <&> (^. valTable)
+                        updateEnvironment "$RETURN" x e >>= modifyEnv . (valTable .~)
                     EnvironmentChanged -> pure ()
-                    VarSet _ _ -> fail "Cannot override literal value"          
+                    VarSet _ _ -> fail "Cannot override literal value"
+                    Pragma _ s -> evalStatement s   
 
 
 withEnvI :: Environment -> InterpreterState

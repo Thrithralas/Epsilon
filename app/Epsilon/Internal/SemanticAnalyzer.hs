@@ -5,13 +5,14 @@ import Control.Applicative
 import Optics hiding ( uncons )
 import Epsilon.Internal.Classes
 import Control.Monad hiding ( MonadFail(..) )
-import Prelude hiding ( MonadFail(..), exp )
+import Prelude hiding ( MonadFail(..), exp, lookup )
 import Data.Text ( Text, uncons )
 -- import Debug.Trace
-import Data.List hiding ( uncons )
+import Data.List hiding ( uncons, lookup, insert )
 import Data.Store
 import Data.Function
 import GHC.Generics
+import Data.Map.Strict hiding ( empty, null, map )
 
 newtype SemanticAnalyzer a = SemanticAnalyzer { runAnalyzer :: AnalyzerState -> Either AnalyzerState (AnalyzerState, a )}
 
@@ -23,12 +24,10 @@ instance Show Severity where
     show Warn = "Warning"
     show Err = "Error"
 
-type TypeTable = [(Text, (Bool, EpsilonType))]
-
 data AnalyzerState = AS {
     _issues :: [(Severity, Text)],
     _environment :: Environment,
-    _typeTable :: TypeTable,
+    _typeTable :: Map Text (Bool, EpsilonType),
     _currReturnType :: EpsilonType
 } deriving (Show, Generic, Store)
 
@@ -38,7 +37,7 @@ instance Semigroup AnalyzerState where
     AS i _ _ _ <> AS i2 e2 t2 c2 = AS (i ++ i2) e2 t2 c2
 
 instance Monoid AnalyzerState where
-    mempty = AS [] [] [] TVoid
+    mempty = AS [] mempty mempty TVoid
 
 instance Functor SemanticAnalyzer where
     fmap f (SemanticAnalyzer p) = SemanticAnalyzer $ fmap (over _2 f) . p
@@ -100,12 +99,12 @@ typeOf (Lookup s) = do
     st <- get
     case lookup s (st ^. typeTable) of
         Nothing -> fail $ "Variable not in scope: " <> s
-        Just (_,t) -> t <$ modify (over typeTable ((s, (True, t)) :))
+        Just (_,t) -> t <$ modify (over typeTable (insert s (True, t)))
 typeOf (ApplyFun (Lookup s) exps) = do
     st <- get
-    case lookup s (st ^. environment) of
+    case lookup s (st ^. (environment % functionTable)) of
         Nothing -> fail $ "Function not in scope: " <> s
-        Just (Function _ prs t _)  -> t <$ (checkForMatch prs exps)
+        Just (MkFunction _ prs t _)  -> t <$ (checkForMatch prs exps)
             where
                 checkForMatch [] [] = pure ()
                 checkForMatch (_:_) [] = fail $ "Not enough supplied parameters in function: " <> s
@@ -117,7 +116,6 @@ typeOf (ApplyFun (Lookup s) exps) = do
                         WellTyped t' n -> guard (t'' == t') <|> fail ("Couldn't match expected type " <> showE t' <> " with actual type " <> showE t'' <> " of parameter '" <> n <> "'")
                         Inferred n -> warn $ "Can't typecheck inferred parameter at compile time of parameter '" <> n <> "'"
                     checkForMatch ps xs
-        _ -> undefined
 typeOf _ = undefined
 
 
@@ -175,16 +173,20 @@ analyze (s:ss) = case s of
         st <- get
         t <- typeOf exp
         case lookup str (st ^. typeTable) of
-            Nothing -> modify (over typeTable $ (:) (str, (False, t)) )
+            Nothing -> modify (over typeTable $ insert str (False, t))
             Just (_, t') -> guard (t == t') <|> fail ("Couldn't match type " <> showE t' <> " with type " <> showE t <> " of variable '" <> str <> "'")
         (VarSet (Lookup str) exp :) <$> analyze ss
-    _ -> undefined
+    Pragma st sts -> do
+        case st of
+            "NOANALYSIS" -> (sts:) <$> analyze ss
+            _            -> warn ("Unknown pragma " <> st <> ", ignoring.") *> analyze (sts:ss)
+    VarSet _ _ -> fail "Non-lookup set expressions are not supported"
 
     
 lifetimeCheck :: SemanticAnalyzer ()
 lifetimeCheck = do
     tt <- (^. typeTable) <$> get
-    forM_ (nubBy ((==) `on` fst) $ reverse $ sortOn snd $ map (\(a,(b,_)) -> (a,b)) tt) (\(a,b) -> unless b $ warn $ "Unused variable '" <> a <> "'")
+    forM_ (nubBy ((==) `on` fst) $ reverse $ sortOn snd $ map (\(a,(b,_)) -> (a,b)) $ toList tt) (\(a,b) -> unless b $ warn $ "Unused variable '" <> a <> "'")
 
 analyzeProgramm :: [Statement] -> SemanticAnalyzer [Statement]
 analyzeProgramm st = analyze st <* lifetimeCheck

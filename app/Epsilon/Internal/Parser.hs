@@ -3,7 +3,7 @@
 module Epsilon.Internal.Parser where
 
 import Optics hiding ( assign, uncons )
-import Data.List hiding ( tail, uncons, isPrefixOf )
+import Data.List hiding ( tail, uncons, isPrefixOf, insert )
 import Control.Monad hiding ( MonadFail(..) )
 import Data.Char
 import Data.Function
@@ -13,6 +13,7 @@ import Prelude hiding ( MonadFail(..), error )
 import qualified Data.Text as T ( empty )
 import Data.String
 import Control.Applicative
+import Data.Map.Strict ( assocs, insert, Map )
 -- import Debug.Trace
 
 newtype Parser a = Parser { runParser :: ParserState -> Either ParserState (ParserState, a) }
@@ -26,7 +27,6 @@ data ParserState = PS {
     _crashed :: Bool
 } deriving Show
 
-makeLenses ''EnvironmentEntry
 makeLenses ''ParserState
 
 instance Functor Parser where
@@ -53,7 +53,7 @@ instance MonadPlus Parser where
 instance EpsilonModule Parser ParserState (Either ParserState) where
     runModule s st = case runParser s st of
         Left l -> pure (l ^. environment, getBacklog (l ^. backlog), Nothing)
-        Right (r,a) -> pure (r ^. environment, getBacklog (r ^. backlog), Just a)
+        Right (r,a) -> pure (r ^. environment, [], Just a)
         where
             getBacklog = (:[]) . (\(_,_,b) -> b) . maximumBy orderLogs
             orderLogs (a,b,s) (d,c,s2)
@@ -93,7 +93,7 @@ instance Semigroup ParserState where
     
 
 instance Monoid ParserState where
-    mempty = PS [] [] "" 0 0 False
+    mempty = PS mempty [] "" 0 0 False
 
 satisfy :: (Char -> Bool) -> Parser Char
 satisfy p = do
@@ -154,7 +154,7 @@ stringLit = between (char '"') (char '"' <|> fail "Unclosed string") (fmap pack 
         )) <|> fail "Multiline strings not supported"
 
 keywords :: [Text]
-keywords = ["if", "else", "while", "function", "operator", "builtin", "infixr", "infixl", "infix", "true", "false"]
+keywords = ["if", "else", "while", "function", "operator", "builtin", "infixr", "infixl", "infix", "true", "false", "return"]
 
 varName :: Parser Text
 varName = pack <$> some (satisfy isAlpha) >>= \s -> s <$ guard (notElem s keywords) <|> fail "Cannot use reserved keyword as variable name"
@@ -195,7 +195,7 @@ groupOn f = groupBy ((==) `on` f)
 
 
 hierarchy :: [(Fixity,  Parser (a -> a -> a))] -> {- atom -}  Parser a -> {- l bracket -}  Parser b -> {- r bracket -}  Parser c -> Parser a
-hierarchy ops u lbrac rbrac = hierarchy' (groupOn (getFixity . fst) $ sortOn (getFixity . fst) ops) (u <|> between lbr rbr (hierarchy ops u lbrac rbrac))
+hierarchy ops u lbrac rbrac = hierarchy' (groupOn (getFixity . fst) $ sortOn (getFixity . fst) ops) (u <|> between lbrac rbrac (hierarchy ops u lbrac rbrac))
     where
         hierarchy' :: [[(Fixity,  Parser (a -> a -> a))]] ->  Parser a ->  Parser a
         hierarchy' [] unit = unit
@@ -219,7 +219,7 @@ sepBy ::   Parser a ->  Parser b ->  Parser [a]
 sepBy v delim = sepBy1 v delim <|> pure []
 
 ws ::   Parser ()
-ws = void $ many $ satisfy (\c -> isSpace c && c /= '\n')
+ws = void $ many $ satisfy isSpace
 
 tok ::   Parser a ->  Parser a
 tok = (<* ws)
@@ -238,8 +238,12 @@ bool = True <$ seqOf "true" <|> False <$ seqOf "false"
 
 expression :: Parser Expression
 expression = do
-    ws
-    ops <- get <&> (\e -> [ (f, (\a b -> ApplyFun (Lookup name) [a, b]) <$ tok (seqOf name) ) | (name, Function { _fixity = Just f }) <- e ^. environment])
+    void $ many $ satisfy (\c -> isSpace c && c /= '\n')
+    ops <- get <&> 
+        (\e -> 
+            [ (fx, (\a b -> ApplyFun (Lookup nam) [a, b]) <$ tok (seqOf nam) ) 
+            | (nam, MkFunction { _fixity = (Just fx) }) <- assocs $ e^. (environment % functionTable)
+            ] ) 
     tok $ hierarchy ops (
         FloatLit <$> tok float <|> 
         IntLit <$> tok signedInt <|> 
@@ -249,11 +253,19 @@ expression = do
         Lookup <$> tok varName <|> fail "Failed to parse expression") 
         lbr rbr
 
+
 funInvoke :: Parser Expression
 funInvoke = do
     name <- fmap pack $ some $ tok $ satisfy isAlpha
     xs <- between lbr rbr $ sepBy expression (char' ',')
     pure $ ApplyFun (Lookup name) xs
+
+pragma :: Parser Statement
+pragma = do
+    str <- between (tok $ seqOf "<#") (tok $ seqOf "#>") (fmap pack $ some $ tok $ satisfy isUpper)
+    tok $ char '\n'
+    st <- statement
+    pure $ Pragma str st
 
 assign :: Parser Statement
 assign = do
@@ -264,7 +276,7 @@ while :: Parser Statement
 while = do
     ws
     tok $ seqOf "while"
-    b <- expression
+    b <- tok expression
     s <- between (char' '{') (char' '}') $ multiS
     pure $ While b s
 
@@ -302,8 +314,7 @@ operator = do
         Just 'r' -> InfixR f;
         _        -> Infix f;
     }
-
-    EnvironmentChanged <$ modify (over environment ((name, Function (Just fx) ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
+    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction (Just fx) ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
     
 function :: Parser Statement
 function = do
@@ -313,7 +324,7 @@ function = do
     name <- fmap pack $ tok $ many $ satisfy isAlpha
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as function name"   
     (pr, rt, body) <- functionSignature $ null b
-    EnvironmentChanged <$ modify (over environment ((name, Function Nothing pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; })) :))
+    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction Nothing pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
 
 functionSignature :: Bool {- builtin -} -> Parser ([Param], EpsilonType, [Statement])
 functionSignature ib = do
@@ -342,7 +353,7 @@ toType "void" = TVoid
 toType _ = undefined
 
 statement :: Parser Statement
-statement = assign <|> while <|> ifElse <|> ifS <|> operator <|> function <|> returnStatement <|> Action <$> expression <|> fail "Failed to parse statement"
+statement = assign <|> while <|> ifElse <|> ifS <|> operator <|> function <|> returnStatement <|> pragma <|> Action <$> expression <|> fail "Failed to parse statement"
 
 returnStatement :: Parser Statement
 returnStatement = do
@@ -352,7 +363,7 @@ returnStatement = do
 
 
 multiS :: Parser [Statement]
-multiS = sepBy statement $ char '\n' --sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
+multiS = sepBy statement $ many $ tok $ char '\n' --sepBy statement (satisfy (\c -> case generalCategory c of { LineSeparator -> True; _ -> False}) <* ws)
 
 eof :: Parser ()
 eof = Parser $ \st -> case uncons (st ^. string) of
@@ -363,5 +374,5 @@ eof = Parser $ \st -> case uncons (st ^. string) of
 program :: Parser [Statement]
 program = ws *> multiS <* eof
 
-withStringAndEnv :: Text -> Environment -> ParserState
-withStringAndEnv tx env = (string .~ tx) . (environment .~ env) $ mempty
+withStringAndEnv :: Text -> Map Text Function -> ParserState
+withStringAndEnv tx env = (string .~ tx) . (environment % functionTable .~ env) $ mempty

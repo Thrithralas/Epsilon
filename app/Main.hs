@@ -11,7 +11,8 @@ import Prelude hiding ( readFile, concat, fail, putStrLn )
 import Epsilon.Internal.Parser
 import Control.Applicative
 import Epsilon.Internal.SemanticAnalyzer
-
+import Debug.Trace
+import Data.Map.Strict hiding ( null, foldr, lookup, empty)
 data EpsilonFlags =
     PrettyPrint |
     AutomaticBuiltins
@@ -40,18 +41,18 @@ match (x:xs) = case uncons x of
     where
         (fs, flgs) = match xs
 
-autoEnv :: Environment
-autoEnv = [
-    ("+", Function (Just $ InfixL 6) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("-", Function (Just $ InfixL 6) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("*", Function (Just $ InfixL 7) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("/", Function (Just $ InfixL 7) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("^", Function (Just $ InfixR 8) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("==", Function (Just $ Infix 4) [Unnamed TInt, Unnamed TInt] TBool Nothing),
-    ("&&", Function (Just $ InfixR 3) [Unnamed TBool, Unnamed TBool] TBool Nothing),
-    ("||", Function (Just $ InfixR 2) [Unnamed TBool, Unnamed TBool] TBool Nothing),
-    ("print", Function Nothing [Unnamed TInt] TVoid Nothing),
-    ("printStr", Function Nothing [Unnamed TString] TVoid Nothing)
+autoEnv :: Map Text Function
+autoEnv = fromList [
+    ("+", MkFunction (Just $ InfixL 6) [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("-", MkFunction (Just $ InfixL 6) [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("*", MkFunction (Just $ InfixL 7) [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("/", MkFunction (Just $ InfixL 7) [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("^", MkFunction (Just $ InfixR 8) [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("==", MkFunction (Just $ Infix 4) [Unnamed TInt, Unnamed TInt] TBool Nothing),
+    ("&&", MkFunction (Just $ InfixR 3) [Unnamed TBool, Unnamed TBool] TBool Nothing),
+    ("||", MkFunction (Just $ InfixR 2) [Unnamed TBool, Unnamed TBool] TBool Nothing),
+    ("print", MkFunction Nothing [Unnamed TInt] TVoid Nothing),
+    ("printStr", MkFunction Nothing [Unnamed TString] TVoid Nothing)
     ]
 
 fromJustIO :: Maybe a -> IO a
@@ -61,7 +62,7 @@ main :: IO ()
 main = (do
     args <- getArgs
     let (files, flags) = match (fmap pack args)
-    let env = if elem AutomaticBuiltins flags then autoEnv else []
+    let env = if elem AutomaticBuiltins flags then autoEnv else mempty
     contents <- concat <$> mapM readFile (fmap unpack files)
 
     (env', ers, sts) <- runModule program (withStringAndEnv contents env)
@@ -74,5 +75,5 @@ main = (do
     sts''' <- fromJustIO sts''
 
     (_, ers'', _) <- runModule (interpretStatements sts''') (withEnvI env'')
-    guard (not $ null ers'') <|> putStrLn ("RUNTIME ERROR:\n\t" <> head ers'') *> empty
+    guard (null ers'') <|> putStrLn ("RUNTIME ERROR:\n\t" <> head ers'') *> empty
     ) <|> pure ()

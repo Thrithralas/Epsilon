@@ -1,4 +1,4 @@
-{-# LANGUAGE FunctionalDependencies, OverloadedStrings, DefaultSignatures, DeriveAnyClass #-}
+{-# LANGUAGE FunctionalDependencies, OverloadedStrings, DefaultSignatures, DeriveAnyClass, TemplateHaskell #-}
 module Epsilon.Internal.Classes where
 
 import Data.Text hiding ( tail, foldr, empty )
@@ -7,7 +7,8 @@ import qualified Prelude as P
 import GHC.Generics ( Generic )
 import Data.Store
 import Control.Monad ( MonadPlus )
-import Control.Monad.IO.Class
+import Data.Map.Strict as Map
+import Optics
 
 class Monad m => MonadFail m where
     fail :: Text -> m a
@@ -15,24 +16,39 @@ class Monad m => MonadFail m where
 instance MonadFail IO where
     fail = P.fail . unpack
 
-type Environment = [(Text, EnvironmentEntry)]
 type BacklogEntry = (Int, Int, Text)
+
+
+data Function = MkFunction { _fixity :: Maybe Fixity, _params :: [Param], _returnType :: EpsilonType, _statements :: Maybe [Statement] } deriving (Show, Eq, Generic, Store)
 
 data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show, Generic, Store)
 
 showE :: EpsilonType -> Text
 showE = pack . tail . show
 
-data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double | VFunction Text EnvironmentEntry deriving (Show, Generic, Store)
+data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double deriving (Eq, Show, Generic, Store)
+
+data Environment = MkEnv {
+    _valTable :: Map Text (Value, EpsilonType),
+    _functionTable :: Map Text Function
+} deriving (Show, Eq, Generic, Store)
+
+
+instance Semigroup Environment where
+    MkEnv vt ft <> MkEnv vt' ft' = MkEnv (union vt vt') (union ft ft')
+
+instance Monoid Environment where
+    mempty = MkEnv empty empty
+
 
 data Expression = 
-    Lookup Text                         |
+    Lookup Text                     |
     IntLit Integer                      |
     BoolLit Bool                        |
     FloatLit Double                     |
     StringLit Text                      |
     ApplyFun Expression [Expression]
-        deriving (Show, Generic, Store)
+        deriving (Eq, Show, Generic, Store)
 
 data Statement =
     VarSet Expression Expression              |
@@ -41,17 +57,13 @@ data Statement =
     While Expression [Statement]              |
     Return Expression                         |
     Action Expression                         |
+    Pragma Text Statement                     |
     EnvironmentChanged   
-        deriving (Show, Generic, Store)
+        deriving (Eq, Show, Generic, Store)
 
-
-data EnvironmentEntry =
-    Function { _fixity :: Maybe Fixity, _params :: [Param], _returnType :: EpsilonType, _statements :: Maybe [Statement] } |
-    Value { _value :: Value, _etype :: EpsilonType }
-        deriving (Show, Generic, Store)
 
 data Fixity = Infix { getFixity :: Int} | InfixR { getFixity :: Int } | InfixL { getFixity :: Int } deriving (Eq, Show, Generic, Store)
-data Param = Unnamed EpsilonType | Inferred Text | WellTyped EpsilonType Text deriving (Show, Generic, Store)
+data Param = Unnamed EpsilonType | Inferred Text | WellTyped EpsilonType Text deriving (Eq, Show, Generic, Store)
 
 
 class (MonadPlus w, Monoid s) => EpsilonModule w s m | w -> s m where
@@ -69,3 +81,5 @@ ifThenElse False _ b = b
 
 modify :: EpsilonModule w s m => (s -> s) -> w ()
 modify f = get >>= put . f
+
+makeLenses ''Environment
