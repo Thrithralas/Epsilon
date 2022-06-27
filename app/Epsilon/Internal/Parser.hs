@@ -256,7 +256,7 @@ expression = do
 
 funInvoke :: Parser Expression
 funInvoke = do
-    name <- fmap pack $ some $ tok $ satisfy isAlpha
+    name <- fmap pack $ some $ satisfy isAlpha
     xs <- between lbr rbr $ sepBy expression (char' ',')
     pure $ ApplyFun (Lookup name) xs
 
