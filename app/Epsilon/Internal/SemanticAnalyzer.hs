@@ -104,7 +104,7 @@ typeOf (ApplyFun (Lookup s) exps) = do
     st <- get
     case lookup s (st ^. (environment % functionTable)) of
         Nothing -> fail $ "Function not in scope: " <> s
-        Just (MkFunction _ prs t _)  -> t <$ (checkForMatch prs exps)
+        Just (MkFunction _ _ prs t _)  -> t <$ (checkForMatch prs exps)
             where
                 checkForMatch [] [] = pure ()
                 checkForMatch (_:_) [] = fail $ "Not enough supplied parameters in function: " <> s

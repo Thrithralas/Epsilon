@@ -18,15 +18,16 @@ instance MonadFail IO where
 
 type BacklogEntry = (Int, Int, Text)
 
+data FunctionFlags = Impure | NoInline deriving (Eq, Show, Generic, Store)
 
-data Function = MkFunction { _fixity :: Maybe Fixity, _params :: [Param], _returnType :: EpsilonType, _statements :: Maybe [Statement] } deriving (Show, Eq, Generic, Store)
+data Function = MkFunction { _fixity :: Maybe Fixity, _functionFlags :: [FunctionFlags], _params :: [Param], _returnType :: EpsilonType, _statements :: Maybe [Statement] } deriving (Show, Eq, Generic, Store)
 
 data EpsilonType = TInt | TBool | TString | TVoid | TFloat | TFunction deriving (Eq, Show, Generic, Store)
 
 showE :: EpsilonType -> Text
 showE = pack . tail . show
 
-data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double deriving (Eq, Show, Generic, Store)
+data Value = VInt Integer | VBool Bool | VString Text | VVoid | VFloat Double deriving (Eq, Ord, Show, Generic, Store)
 
 data Environment = MkEnv {
     _valTable :: Map Text (Value, EpsilonType),
@@ -42,7 +43,7 @@ instance Monoid Environment where
 
 
 data Expression = 
-    Lookup Text                     |
+    Lookup Text                         |
     IntLit Integer                      |
     BoolLit Bool                        |
     FloatLit Double                     |

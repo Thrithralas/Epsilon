@@ -314,7 +314,7 @@ operator = do
         Just 'r' -> InfixR f;
         _        -> Infix f;
     }
-    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction (Just fx) ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
+    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction (Just fx) [] ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
     
 function :: Parser Statement
 function = do
@@ -324,7 +324,7 @@ function = do
     name <- fmap pack $ tok $ many $ satisfy isAlpha
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as function name"   
     (pr, rt, body) <- functionSignature $ null b
-    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction Nothing pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
+    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction Nothing [] pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
 
 functionSignature :: Bool {- builtin -} -> Parser ([Param], EpsilonType, [Statement])
 functionSignature ib = do

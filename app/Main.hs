@@ -43,16 +43,16 @@ match (x:xs) = case uncons x of
 
 autoEnv :: Map Text Function
 autoEnv = fromList [
-    ("+", MkFunction (Just $ InfixL 6) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("-", MkFunction (Just $ InfixL 6) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("*", MkFunction (Just $ InfixL 7) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("/", MkFunction (Just $ InfixL 7) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("^", MkFunction (Just $ InfixR 8) [Unnamed TInt, Unnamed TInt] TInt Nothing),
-    ("==", MkFunction (Just $ Infix 4) [Unnamed TInt, Unnamed TInt] TBool Nothing),
-    ("&&", MkFunction (Just $ InfixR 3) [Unnamed TBool, Unnamed TBool] TBool Nothing),
-    ("||", MkFunction (Just $ InfixR 2) [Unnamed TBool, Unnamed TBool] TBool Nothing),
-    ("print", MkFunction Nothing [Unnamed TInt] TVoid Nothing),
-    ("printStr", MkFunction Nothing [Unnamed TString] TVoid Nothing)
+    ("+", MkFunction (Just $ InfixL 6) [] [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("-", MkFunction (Just $ InfixL 6) [] [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("*", MkFunction (Just $ InfixL 7) [] [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("/", MkFunction (Just $ InfixL 7) [] [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("^", MkFunction (Just $ InfixR 8) [] [Unnamed TInt, Unnamed TInt] TInt Nothing),
+    ("==", MkFunction (Just $ Infix 4) [] [Unnamed TInt, Unnamed TInt] TBool Nothing),
+    ("&&", MkFunction (Just $ InfixR 3) [] [Unnamed TBool, Unnamed TBool] TBool Nothing),
+    ("||", MkFunction (Just $ InfixR 2) [] [Unnamed TBool, Unnamed TBool] TBool Nothing),
+    ("print", MkFunction Nothing [] [Unnamed TInt] TVoid Nothing),
+    ("printStr", MkFunction Nothing [] [Unnamed TString] TVoid Nothing)
     ]
 
 fromJustIO :: Maybe a -> IO a

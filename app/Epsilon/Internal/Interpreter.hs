@@ -6,7 +6,7 @@ import Control.Monad hiding ( MonadFail(..) )
 import Control.Applicative
 import Control.Monad.IO.Class
 import Data.String
-import Data.Text hiding ( empty, zip, foldl, foldl1, foldr, filter )
+import Data.Text hiding ( empty, zip, foldl, foldl1, foldr, filter, singleton )
 import Data.Text.IO
 import Epsilon.Internal.Classes
 import Optics
@@ -19,13 +19,14 @@ data InterpreterState = IS {
     _environment :: Environment,
     _backlog :: [Text],
     _stacktrace :: [Text],
-    _crashed :: Bool
+    _crashed :: Bool,
+    _memoizationTable :: Map Text (Map [Value] Value)
 }
 
 instance Semigroup InterpreterState where
 
 instance Monoid InterpreterState where
-    mempty = IS mempty [] [] False
+    mempty = IS mempty [] [] False (fromList [])
 
 makeLenses ''InterpreterState
 
@@ -124,28 +125,38 @@ evalExp = \case
         env <- getEnv <&> (^. functionTable)
         vals <- mapM evalExp params
         case env !? s of
-            Just (MkFunction _ ps r (Just instrs)) -> runFunction (zip vals ps) instrs s r
-            Just (MkFunction _ _ _ Nothing) -> handleBuiltin s vals
+            Just (MkFunction _ fs ps r (Just instrs)) -> runFunction (zip vals ps) instrs s r fs
+            Just (MkFunction _ _ _ _ Nothing) -> handleBuiltin s vals
             _ -> fail $  "Expression does not reference a function " <> (pack $ show s)
     ApplyFun _ _ -> fail "Function invocation for non-lookup expressions is not supported"
 
-runFunction :: [(Value, Param)] -> [Statement] -> Text {- name -} -> EpsilonType {- returnType -} -> Interpreter IO Value
-runFunction vps func n rt = do
-    e <- getEnv
-    forM_ vps (\(val, par) -> case par of
-        Unnamed _ -> fail "Unnamed params not allowed in non-builtin function or operator"
-        WellTyped t n | t == typeOf val -> modifyEnv (over valTable $ insert n (val, t))
-        WellTyped t n -> fail $ "Couldn't match type " <> showE t <> " of parameter '" <> n <> "' with actual type " <> showE (typeOf val) <> "\n\tin the function invocation of " <> n
-        Inferred n -> modifyEnv (over valTable $ insert n (val, typeOf val))
-        )
-    modify $ over stacktrace ((:) $ n <> "(" <> intercalate " , " (fmap showType vps) <> ")")
-    interpretStatements func
-    e' <- getEnv <&> (^. valTable)
-    putEnv $ e --drop (length e' - length e) e'
-    case lookup "$RETURN" e' of
-        Just (v,t) -> if t == rt then pure v else fail $ "Couldn't match type " <> showE t <> " with return type " <> showE rt <> "\n\tin the function invocation of " <> n
-        _ | rt == TVoid -> pure VVoid
-        _               -> fail $ "Missing non-void return value of type " <> showE rt <> "\n\tin the function invocation of " <> n
+runFunction :: [(Value, Param)] -> [Statement] -> Text {- name -} -> EpsilonType {- returnType -} -> [FunctionFlags] {- flags -} -> Interpreter IO Value
+runFunction vps func n rt fl = do
+    mt <- get <&> (^. memoizationTable)
+    case (notElem Impure fl, mt !? n) of
+        (True, Just mp) | Just v <- mp !? (fmap fst vps) -> pure v
+        _ -> do
+            e <- getEnv
+            forM_ vps (\(val, par) -> case par of
+                Unnamed _ -> fail "Unnamed params not allowed in non-builtin function or operator"
+                WellTyped t n | t == typeOf val -> modifyEnv (over valTable $ insert n (val, t))
+                WellTyped t n -> fail $ "Couldn't match type " <> showE t <> " of parameter '" <> n <> "' with actual type " <> showE (typeOf val) <> "\n\tin the function invocation of " <> n
+                Inferred n -> modifyEnv (over valTable $ insert n (val, typeOf val))
+                )
+            modify $ over stacktrace ((:) $ n <> "(" <> intercalate " , " (fmap showType vps) <> ")")
+            interpretStatements func
+            e' <- getEnv <&> (^. valTable)
+            putEnv $ e --drop (length e' - length e) e'
+            case lookup "$RETURN" e' of
+                Just (v,t) -> 
+                    if t /= rt 
+                    then fail $ "Couldn't match type " <> showE t <> " with return type " <> showE rt <> "\n\tin the function invocation of " <> n
+                    else v <$ modify (over memoizationTable $ insertWithKey (\k t a -> case k == n of
+                            True -> union t a
+                            False -> a
+                            ) n (singleton (fmap fst vps) v))
+                _ | rt == TVoid -> pure VVoid
+                _               -> fail $ "Missing non-void return value of type " <> showE rt <> "\n\tin the function invocation of " <> n
     where
             showType (_,Unnamed t) = toLower $ showE t
             showType (_,WellTyped t _) = toLower $ showE t
@@ -171,15 +182,6 @@ updateEnvironment s v map | Just (_,t) <- map !? s =
     else fail $ "Couldn't match type " <> (pack $ show t) <> " of field '" <> s <> "' with actual type " <> (pack $ show $ typeOf v) 
 updateEnvironment s v map = pure $ insert s (v, typeOf v) map
 
-{-
-[] = pure [(s, Value v (typeOf v))]
-updateEnvironment s v (x@(s',v'):xs)
-    | s /= s' = fmap (x:) $ updateEnvironment s v xs
-    | Value v'' t <- v' = case t == typeOf v of
-        True -> pure $ (s, Value v t) : xs
-        _    -> fail $ "Couldn't match type " <> (pack $ show t) <> " (ILT: " <> (pack $ show  v'') <> ") of field '" <> s <> "' with actual type " <> (pack $ show $ typeOf v)
-    | otherwise = fmap (x:) $ updateEnvironment s v xs
--}
 
 evalStatement :: Statement -> Interpreter IO ()
 evalStatement s = do
