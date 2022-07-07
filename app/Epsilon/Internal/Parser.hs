@@ -154,7 +154,7 @@ stringLit = between (char '"') (char '"' <|> fail "Unclosed string") (fmap pack 
         )) <|> fail "Multiline strings not supported"
 
 keywords :: [Text]
-keywords = ["if", "else", "while", "function", "operator", "builtin", "infixr", "infixl", "infix", "true", "false", "return"]
+keywords = ["if", "else", "while", "function", "operator", "builtin", "infixr", "infixl", "infix", "true", "false", "return", "<#", "#>", "(", ")", "{", "}"]
 
 varName :: Parser Text
 varName = pack <$> some (satisfy isAlpha) >>= \s -> s <$ guard (notElem s keywords) <|> fail "Cannot use reserved keyword as variable name"
@@ -242,7 +242,7 @@ expression = do
     ops <- get <&> 
         (\e -> 
             [ (fx, (\a b -> ApplyFun (Lookup nam) [a, b]) <$ tok (seqOf nam) ) 
-            | (nam, MkFunction { _fixity = (Just fx) }) <- assocs $ e^. (environment % functionTable)
+            | (nam, MkFunction { _fixity = (Just fx) }) <- assocs $ e ^. (environment % functionTable)
             ] ) 
     tok $ hierarchy ops (
         FloatLit <$> tok float <|> 
@@ -263,7 +263,6 @@ funInvoke = do
 pragma :: Parser Statement
 pragma = do
     str <- between (tok $ seqOf "<#") (tok $ seqOf "#>") (fmap pack $ some $ tok $ satisfy isUpper)
-    tok $ char '\n'
     st <- statement
     pure $ Pragma str st
 
@@ -314,7 +313,7 @@ operator = do
         Just 'r' -> InfixR f;
         _        -> Infix f;
     }
-    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction (Just fx) [] ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
+    EnvironmentChanged name <$ modify (over (environment % functionTable) (insert name (MkFunction (Just fx) [] ps rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
     
 function :: Parser Statement
 function = do
@@ -324,7 +323,7 @@ function = do
     name <- fmap pack $ tok $ many $ satisfy isAlpha
     guard (notElem name keywords) <|> fail "Can't use reserved keyword as function name"   
     (pr, rt, body) <- functionSignature $ null b
-    EnvironmentChanged <$ modify (over (environment % functionTable) (insert name (MkFunction Nothing [] pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
+    EnvironmentChanged name <$ modify (over (environment % functionTable) (insert name (MkFunction Nothing [] pr rt (case b of { Just _ -> Nothing; Nothing -> Just body; }))))
 
 functionSignature :: Bool {- builtin -} -> Parser ([Param], EpsilonType, [Statement])
 functionSignature ib = do

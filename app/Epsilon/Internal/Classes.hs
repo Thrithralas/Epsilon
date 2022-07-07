@@ -59,7 +59,7 @@ data Statement =
     Return Expression                         |
     Action Expression                         |
     Pragma Text Statement                     |
-    EnvironmentChanged   
+    EnvironmentChanged Text  
         deriving (Eq, Show, Generic, Store)
 
 
@@ -84,3 +84,4 @@ modify :: EpsilonModule w s m => (s -> s) -> w ()
 modify f = get >>= put . f
 
 makeLenses ''Environment
+makeLenses ''Function

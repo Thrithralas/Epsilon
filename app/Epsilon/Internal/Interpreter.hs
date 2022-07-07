@@ -208,7 +208,7 @@ evalStatement s = do
                         x <- evalExp exp
                         e <- getEnv <&> (^. valTable)
                         updateEnvironment "$RETURN" x e >>= modifyEnv . (valTable .~)
-                    EnvironmentChanged -> pure ()
+                    EnvironmentChanged _ -> pure ()
                     VarSet _ _ -> fail "Cannot override literal value"
                     Pragma _ s -> evalStatement s   
 

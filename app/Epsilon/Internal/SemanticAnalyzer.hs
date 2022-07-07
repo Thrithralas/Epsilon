@@ -28,16 +28,17 @@ data AnalyzerState = AS {
     _issues :: [(Severity, Text)],
     _environment :: Environment,
     _typeTable :: Map Text (Bool, EpsilonType),
-    _currReturnType :: EpsilonType
+    _currReturnType :: EpsilonType,
+    _impureContext :: Bool
 } deriving (Show, Generic, Store)
 
 makeLenses ''AnalyzerState
 
 instance Semigroup AnalyzerState where
-    AS i _ _ _ <> AS i2 e2 t2 c2 = AS (i ++ i2) e2 t2 c2
+    AS i _ _ _ _ <> AS i2 e2 t2 c2 ic2 = AS (i ++ i2) e2 t2 c2 ic2
 
 instance Monoid AnalyzerState where
-    mempty = AS [] mempty mempty TVoid
+    mempty = AS [] mempty mempty TVoid False
 
 instance Functor SemanticAnalyzer where
     fmap f (SemanticAnalyzer p) = SemanticAnalyzer $ fmap (over _2 f) . p
@@ -123,7 +124,7 @@ typeOf _ = undefined
 analyze :: [Statement] -> SemanticAnalyzer [Statement]
 analyze [] = pure []
 analyze (s:ss) = case s of
-    EnvironmentChanged -> analyze ss
+    EnvironmentChanged _ -> analyze ss
     If exp brnch -> do
         case brnch of 
             [] -> warn "Empty 'if' branch will be omitted" *> analyze ss
@@ -159,8 +160,10 @@ analyze (s:ss) = case s of
                         _ -> fail "Non-bool expression in 'while' statement"
     Action exp -> do
         t <- typeOf exp
+        b <- get <&> (^. impureContext)
         case t of
             TVoid -> (Action exp :) <$> analyze ss
+            _ | b -> (Action exp :) <$> analyze ss
             _     -> warn "Discarding a non-void type will be omitted" *> analyze ss
     Return exp -> do
         t <- typeOf exp
@@ -179,14 +182,24 @@ analyze (s:ss) = case s of
     Pragma st sts -> do
         case st of
             "NOANALYSIS" -> (sts:) <$> analyze ss
+            "IMPURE" -> case sts of
+                EnvironmentChanged f -> modify (over (environment % functionTable) $ mapWithKey update) *> analyze ss
+                    where
+                        update k (MkFunction x fs ps et sts) | k == f = MkFunction x (Impure : fs) ps et sts
+                        update _ func = func
+                _ -> do
+                    p <- get <&> (^. impureContext)
+                    modify $ impureContext .~ True
+                    ss' <- analyze [sts]
+                    modify $ impureContext .~ p
+                    (ss' ++) <$> analyze ss
             _            -> warn ("Unknown pragma " <> st <> ", ignoring.") *> analyze (sts:ss)
     VarSet _ _ -> fail "Non-lookup set expressions are not supported"
-
     
 lifetimeCheck :: SemanticAnalyzer ()
 lifetimeCheck = do
     tt <- (^. typeTable) <$> get
-    forM_ (nubBy ((==) `on` fst) $ reverse $ sortOn snd $ map (\(a,(b,_)) -> (a,b)) $ toList tt) (\(a,b) -> unless b $ warn $ "Unused variable '" <> a <> "'")
+    forM_ (nubBy ((==) `on` fst) $ reverse $ sortOn snd $ fmap (\(a,(b,_)) -> (a,b)) $ toList tt) (\(a,b) -> unless b $ warn $ "Unused variable '" <> a <> "'")
 
 analyzeProgramm :: [Statement] -> SemanticAnalyzer [Statement]
 analyzeProgramm st = analyze st <* lifetimeCheck

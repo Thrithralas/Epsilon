@@ -18,7 +18,7 @@ maintainer:         tx0lwm@inf.elte.hu
 -- category:
 extra-source-files: CHANGELOG.md
 
-executable Epsilon
+executable epsilon-compile
     main-is:          Main.hs
 
     ghc-options:
@@ -33,6 +33,7 @@ executable Epsilon
         Epsilon.Internal.SemanticAnalyzer,
         Epsilon.Internal.Classes,
         Epsilon.Serialization,
+        Epsilon.CliOptions
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -42,7 +43,8 @@ executable Epsilon
         text,
         store,
         bytestring,
-        containers
+        containers,
+        optparse-applicative
         
     hs-source-dirs:   app
     default-language: GHC2021
