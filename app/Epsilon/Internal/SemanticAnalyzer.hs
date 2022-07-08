@@ -1,4 +1,30 @@
 {-# LANGUAGE OverloadedStrings, TemplateHaskell, LambdaCase, DeriveAnyClass #-}
+
+{-|
+Module : Epsilon.Internal.SemanticAnalyzer
+Description : Definition of the monad which handles pre-runtime optimizations and type checking.
+Copyright : (c) Thrithralas 2022
+License : None
+Maintainer : marci.petes@gmail.com
+Stability : experimental
+Description : 
+In Epsilon, the `SemanticAnalyzer` handles most of the heavy lifting to make sure the program running is correct. It handles all its tasks in one iteration, making it as fast as it could be complexity-wise.
+
+The analyzer has three main tasks:
+
+    * Type checking
+
+    * Omitting
+
+    * Inlining
+
+
+The analyzer tries to make sure that the types of the supplied parameters of each function invocation match that of the declaration. Momentarily it is unable to check builtin functions or variables with inferred types. The latter can be used to defer type checking but it is not advised and considered a bad practice.
+
+The analyzer omits (or at least tries to) empty if-else branches, empty loops and notifies the user of unused variables. The analyzer can sometimes get a bit omit-happy and omit non-void discarded statements, but this can be deferred using the NOANALYSIS or IMPURE pragmas. Note that omitting a branch can possibly lead to unresolved type issues in the future, as omitted code is not analyzed.
+
+Inlining is not (yet) implemented, but inlining depth will default to 1. A specific function can be agressively inlined using the RECURSIVEINLINE pragma, but this is dangerous, as the analyzer could get stuck in an infinite loop.
+-}
 module Epsilon.Internal.SemanticAnalyzer where
 
 import Control.Applicative
@@ -14,24 +40,26 @@ import Data.Function
 import GHC.Generics
 import Data.Map.Strict hiding ( empty, null, map )
 
+-- | The state monad representing the semantic analyzer. The monad supports failure by providing error messages embedded into its `AnalyzerState`.
 newtype SemanticAnalyzer a = SemanticAnalyzer { runAnalyzer :: AnalyzerState -> Either AnalyzerState (AnalyzerState, a )}
 
-data Severity = Note | Warn | Err deriving (Generic, Store)
-data Handling = Ignore | Warning | Error | TryFix
+-- | A sum type representing the severity of an error. Used after analysis for colouring mostly.
+data Severity = {- | A non-fatal warning. -} Warn | {- | A fatal error. -} Err deriving (Generic, Store)
 
 instance Show Severity where
-    show Note = "Note"
     show Warn = "Warning"
     show Err = "Error"
 
+-- | The internal state of the analyzer. The underscores are required for the optics plugin to generate lenses.
 data AnalyzerState = AS {
-    _issues :: [(Severity, Text)],
-    _environment :: Environment,
-    _typeTable :: Map Text (Bool, EpsilonType),
-    _currReturnType :: EpsilonType,
-    _impureContext :: Bool
+    _issues :: [(Severity, Text)], -- ^ Contains issues collected by the analyzer, tied to a severity.
+    _environment :: Environment, -- ^ A program environment.
+    _typeTable :: Map Text (Bool, EpsilonType), -- ^ A `Map` correlating a variable to its usage and type. This is primarily used for type errors and usage warnings.
+    _currReturnType :: EpsilonType, -- ^ The return type of the function we are analyzing.
+    _impureContext :: Bool -- ^ Wether the current context is IMPURE
 } deriving (Show, Generic, Store)
 
+-- * TH Generated Lenses
 makeLenses ''AnalyzerState
 
 instance Semigroup AnalyzerState where
@@ -69,7 +97,7 @@ instance MonadFail SemanticAnalyzer where
         where
             format s _ = s
 
-instance EpsilonModule SemanticAnalyzer AnalyzerState (Either AnalyzerState) where
+instance EpsilonModule SemanticAnalyzer AnalyzerState where
     runModule st s = case runAnalyzer st s of
         Left l -> pure (l ^. environment, getBacklog (l ^. issues), Nothing)
         Right (r,a) -> pure (r ^. environment, getBacklog (r ^. issues), Just a)
@@ -81,16 +109,14 @@ instance EpsilonModule SemanticAnalyzer AnalyzerState (Either AnalyzerState) whe
                 _            -> []
             format' Err a = "\x1b[31m[Error] " <> a <> "\x1b[0m"
             format' Warn a = "\x1b[33m[Warning] " <> a <> "\x1b[0m"
-            format' Note a = "[Note]" <> a
     error = fail
-    ctor = SemanticAnalyzer
     put ps = SemanticAnalyzer $ const $ Right (ps, ())
     get = SemanticAnalyzer $ \ps -> Right (ps,ps)
     warn tx = SemanticAnalyzer $ \st -> Right $ (over issues ((Warn, format tx st) :) $ st, ())
         where
             format s _ = s
-
-
+-- * Auxilliary functions
+-- | Converts an expression to a type. The function can fail with various scope issues and type mismatches, so checking for errors is advised. The function currently fails with a unique error messages if the supplied expression is a non-text based lookup.
 typeOf :: Expression -> SemanticAnalyzer EpsilonType
 typeOf (IntLit _)  = pure TInt
 typeOf (FloatLit _) = pure TFloat
@@ -117,10 +143,10 @@ typeOf (ApplyFun (Lookup s) exps) = do
                         WellTyped t' n -> guard (t'' == t') <|> fail ("Couldn't match expected type " <> showE t' <> " with actual type " <> showE t'' <> " of parameter '" <> n <> "'")
                         Inferred n -> warn $ "Can't typecheck inferred parameter at compile time of parameter '" <> n <> "'"
                     checkForMatch ps xs
-typeOf _ = undefined
+typeOf _ = fail "??? Unresolved"
 
 
-
+-- | The main function of the analyzer. Due to omitting and - in rare cases - code generation, this function could not be implemented with mapM.
 analyze :: [Statement] -> SemanticAnalyzer [Statement]
 analyze [] = pure []
 analyze (s:ss) = case s of
@@ -195,14 +221,17 @@ analyze (s:ss) = case s of
                     (ss' ++) <$> analyze ss
             _            -> warn ("Unknown pragma " <> st <> ", ignoring.") *> analyze (sts:ss)
     VarSet _ _ -> fail "Non-lookup set expressions are not supported"
-    
+
+-- | Checks the wether all variables have been used in the type table.
 lifetimeCheck :: SemanticAnalyzer ()
 lifetimeCheck = do
     tt <- (^. typeTable) <$> get
-    forM_ (nubBy ((==) `on` fst) $ reverse $ sortOn snd $ fmap (\(a,(b,_)) -> (a,b)) $ toList tt) (\(a,b) -> unless b $ warn $ "Unused variable '" <> a <> "'")
+    forM_ (fmap (\(a,(b,_)) -> (a,b)) $ toList tt) (\(a,b) -> unless b $ warn $ "Unused variable '" <> a <> "'")
 
+-- | The root of the analyzer, running analysis on all given statements, followed by the `lifetimeCheck`.
 analyzeProgramm :: [Statement] -> SemanticAnalyzer [Statement]
 analyzeProgramm st = analyze st <* lifetimeCheck
 
+-- | Provides an optic-free interface to generate a state solely from the environment.
 withEnvSA :: Environment -> AnalyzerState
 withEnvSA env = (environment .~ env) mempty

@@ -1,15 +1,28 @@
-module Epsilon.CliOptions (execParser, CliFlags(..), cliFlagsO) where
+{-|
+Module : Epsilon.CliOptions
+Description : Commandline arguments parser using optparse-applicative
+Copyright : (c) Thrithralas 2022
+License : None
+Maintainer : marci.petes@gmail.com
+Stability : experimental
+Description : 
+The definion of CLI argument flags and their parsers. Note that the parsers here aren't affiliated with the parsers in `Epsilon.Internal.Parser`.
+-}
+
+module Epsilon.CliOptions ({- | Execute the optparse-applicative parser into an `IO` context. -}execParser, CliFlags(..), cliFlagsO) where
 
 import Options.Applicative
 import Data.Text
 
+-- | Flags used by the compiler.
 data CliFlags = CF {
-    files :: Text,
-    automaticBuiltins :: Bool,
-    inlineDepth :: Int,
-    debugMessages :: Bool
+    files :: Text, -- ^ The file to parse.
+    automaticBuiltins :: Bool, -- ^ Wether to import automatic builtins or not.
+    inlineDepth :: Int, -- ^ The depth at which functions are inlined.
+    debugMessages :: Bool -- ^ Wether to show debug messages or not.
 }
 
+-- | The optparse-applicative parser for the `CliFlags`. For everyday usage, please see `cliFlagsO`.
 cliFlags :: Parser CliFlags
 cliFlags = CF
     <$> strOption (
@@ -36,6 +49,7 @@ cliFlags = CF
         <> help "Print helpful debug messages and monad states"
     )
 
+-- | Constructs a `ParserInfo` from the parser, to assign a description and a helper.
 cliFlagsO :: ParserInfo CliFlags
 cliFlagsO = info (cliFlags <**> helper) (
     fullDesc
