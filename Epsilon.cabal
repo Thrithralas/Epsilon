@@ -44,7 +44,8 @@ executable epsilon-compile
         store,
         bytestring,
         containers,
-        optparse-applicative
+        optparse-applicative,
+        clock
         
     hs-source-dirs:   app
     default-language: GHC2021

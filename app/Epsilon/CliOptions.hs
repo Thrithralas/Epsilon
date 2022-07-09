@@ -19,7 +19,8 @@ data CliFlags = CF {
     files :: Text, -- ^ The file to parse.
     automaticBuiltins :: Bool, -- ^ Wether to import automatic builtins or not.
     inlineDepth :: Int, -- ^ The depth at which functions are inlined.
-    debugMessages :: Bool -- ^ Wether to show debug messages or not.
+    debugMessages :: Bool, -- ^ Wether to show debug messages or not.
+    timeBenchmark :: Bool -- ^ Wether to time each step.
 }
 
 -- | The optparse-applicative parser for the `CliFlags`. For everyday usage, please see `cliFlagsO`.
@@ -47,6 +48,11 @@ cliFlags = CF
         long "debug"
         <> short 'd'
         <> help "Print helpful debug messages and monad states"
+    )
+    <*> switch (
+        long "time"
+        <> short 't'
+        <> help "Time each compilation module"
     )
 
 -- | Constructs a `ParserInfo` from the parser, to assign a description and a helper.

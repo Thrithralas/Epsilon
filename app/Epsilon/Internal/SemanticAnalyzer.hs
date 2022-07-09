@@ -34,9 +34,7 @@ import Control.Monad hiding ( MonadFail(..) )
 import Prelude hiding ( MonadFail(..), exp, lookup )
 import Data.Text ( Text, uncons )
 -- import Debug.Trace
-import Data.List hiding ( uncons, lookup, insert )
 import Data.Store
-import Data.Function
 import GHC.Generics
 import Data.Map.Strict hiding ( empty, null, map )
 
